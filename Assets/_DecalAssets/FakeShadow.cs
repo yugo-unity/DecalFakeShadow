@@ -4,34 +4,46 @@ using UnityEngine.Rendering.Universal;
 namespace UTJ {
     public class FakeShadow : MonoBehaviour {
         [SerializeField]
-        private DecalProjector decalProjector = null; // RuntimeでDecalProjectorを生成してもいい
+        bool shadowMesh = false;
+        [SerializeField]
+        DecalProjector projector = null; // NOTE: RuntimeでDecalProjectorを生成してもいいが...
 
-        private int fakeIndex = -1;
+        new Renderer renderer = null;
 
-        void Start() {
-            this.fakeIndex = FakeShadowManager.Request(out var fakeMaterial, out var uvScale, out var uvBias);
-            if (this.fakeIndex >= 0) {
-                var renderer = this.GetComponent<Renderer>();
+        public bool isShadowMesh { get => this.shadowMesh; }
 
-                // SubMesh対応
-                // SkinnedMeshはMeshRendererを分けずにSubMeshの方がオーバーヘッドが低いのでMulti Renderer対応はしない
-                var materials = renderer.sharedMaterials;
-                for (var i = 0; i < materials.Length; ++i)
-                    materials[i] = fakeMaterial;
-                renderer.materials = materials;
+        void OnEnable() {
+            if (this.renderer == null)
+                this.renderer = this.GetComponent<Renderer>();
 
-                this.decalProjector.uvScale = uvScale;
-                this.decalProjector.uvBias = uvBias;
-            } else {
-                Debug.LogError("Failed to request for FakeShadow. Increase the max count.");
+            var ret = FakeShadowManager.Request(this);
+            if (!ret) {
+                Debug.LogError("Failed to request for FakeShadow. Increase the max count");
+                this.projector.enabled = false;
             }
         }
 
-        private void OnDestroy() {
-            // 与えられたインデックスを返却する、OnEnable/OnDisableでもOK
-            if (this.fakeIndex >= 0)
-                FakeShadowManager.Return(this.fakeIndex);
-            this.fakeIndex = -1;
+        void OnDisable() {
+            // 与えられたインデックスを返却
+            FakeShadowManager.Return(this);
+        }
+
+        public void UpdateUV(float uvScale, Vector2 uvBias, Material material) {
+            this.projector.uvScale = new Vector2(uvScale, uvScale);
+            this.projector.uvBias = uvBias;
+
+            var materials = this.renderer.sharedMaterials;
+            for (var i = 0; i < materials.Length; ++i)
+                materials[i] = material;
+            this.renderer.materials = materials;
+        }
+        public void UpdateUV(float uvScale, Vector2 uvBias, int propertyId, Vector4 offset) {
+            this.projector.uvScale = new Vector2(uvScale, uvScale);
+            this.projector.uvBias = uvBias;
+
+            var materials = this.renderer.materials;
+            foreach (var mat in materials)
+                mat.SetVector(propertyId, offset);
         }
     }
 }

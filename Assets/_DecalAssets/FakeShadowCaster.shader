@@ -2,9 +2,7 @@ Shader "UTJ/FakeShadowCaster"
 {
     Properties
     {
-        [MainColor] _BaseColor("Color", Color) = (1, 1, 1, 1)
-        _Line("Index", Float) = 0
-        [ShowAsVector2] _Offset("Scale", Vector) = (0, 0, 0, 0)
+        [HideInInspector] _FakeShadowOffset("Scale", Vector) = (0, 0, 0, 0)
     }
 
     SubShader
@@ -12,15 +10,15 @@ Shader "UTJ/FakeShadowCaster"
         Tags {"RenderType" = "Opaque" "IgnoreProjector" = "True" "RenderPipeline" = "UniversalPipeline" "ShaderModel" = "4.5"}
         LOD 100
 
-        Blend One Zero
-        Cull Back
-        ZWrite Off
-        ZTest LEqual
-
         Pass
         {
-            Name "Forward"
+            Name "ShadowCaster"
             Tags{"LightMode" = "FakeShadow"}
+
+            Blend One Zero
+            Cull Back
+            ZWrite Off
+            ZTest LEqual
 
             HLSLPROGRAM
             #pragma exclude_renderers gles gles3 glcore
@@ -33,13 +31,15 @@ Shader "UTJ/FakeShadowCaster"
             #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Color.hlsl"
 
 CBUFFER_START(UnityPerMaterial)
-            half4 _BaseColor;
-            float _Line;
-            float4 _Offset;
+            float4 _FakeShadowOffset;
 CBUFFER_END
+
+            // Global properties
+            float _FakeShadowLine;
+            half4 _FakeShadowColor;
             //float4x4 _ModelMat;
-            float4x4 _ViewMat;
-            float4x4 _ProjMat;
+            float4x4 _FakeShadowView;
+            float4x4 _FakeShadowProj;
 
             struct Attributes
             {
@@ -57,13 +57,15 @@ CBUFFER_END
 
                 // モデル行列は単位行列なので乗算不要
                 //float4 pos = mul(mul(_ProjMat, mul(_ViewMat, ModelMat)), float4(input.positionOS.xyz, 1.0));
-                float4 pos = mul(mul(_ProjMat, _ViewMat), float4(input.positionOS.xyz, 1.0));
+                float4 pos = mul(mul(_FakeShadowProj, _FakeShadowView), float4(input.positionOS.xyz, 1.0));
 
                 // 似非Viewport計算によるグリッド対応
                 pos.xyz /= pos.w;
-                pos.xy /= _Line;      // 左下
-                pos.xy += _Offset.xy; // 指定位置
+                pos.xy /= _FakeShadowLine;      // グリッド分割数なので0が来ることはない
+                pos.xy += _FakeShadowOffset.xy; // 指定位置
                 pos.xyz *= pos.w;
+
+                //pos = mul(UNITY_MATRIX_VP, mul(UNITY_MATRIX_M, float4(input.positionOS.xyz, 1.0)));
 
                 output.positionCS = pos;
 
@@ -72,7 +74,7 @@ CBUFFER_END
 
             half4 frag(Varyings input) : SV_Target
             {
-                return _BaseColor;
+                return _FakeShadowColor;
             }
             ENDHLSL
         }
