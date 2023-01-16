@@ -17,8 +17,10 @@ namespace UTJ {
                 this.renderer = this.GetComponent<Renderer>();
 
             var ret = FakeShadowManager.Request(this);
-            if (!ret) {
-                Debug.LogError("Failed to request for FakeShadow. Increase the max count");
+            if (ret) {
+                this.projector.enabled = true;
+            } else {
+                Debug.LogError("Failed to request for FakeShadow. Increase the max count.");
                 this.projector.enabled = false;
             }
         }
@@ -26,6 +28,7 @@ namespace UTJ {
         void OnDisable() {
             // 与えられたインデックスを返却
             FakeShadowManager.Return(this);
+            this.projector.enabled = false;
         }
 
         public void UpdateUV(float uvScale, Vector2 uvBias, Material material) {
@@ -44,6 +47,10 @@ namespace UTJ {
             var materials = this.renderer.materials;
             foreach (var mat in materials)
                 mat.SetVector(propertyId, offset);
+        }
+        public void Cancel() {
+            Debug.LogError("Canceled FakeShadow. The max count is insufficient.");
+            this.projector.enabled = false;
         }
     }
 }

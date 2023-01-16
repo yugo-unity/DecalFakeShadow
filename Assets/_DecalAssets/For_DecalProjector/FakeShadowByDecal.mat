@@ -22,7 +22,8 @@ Material:
   m_PrefabAsset: {fileID: 0}
   m_Name: FakeShadowByDecal
   m_Shader: {fileID: 4800000, guid: a5da91b415ed0fe46849c7a9f0cc8a59, type: 3}
-  m_ValidKeywords: []
+  m_ValidKeywords:
+  - DECAL_ANGLE_FADE
   m_InvalidKeywords: []
   m_LightmapFlags: 4
   m_EnableInstancingVariants: 1
@@ -107,6 +108,7 @@ Material:
     - _ClearCoatSmoothness: 0
     - _Cull: 2
     - _Cutoff: 0.5
+    - _DecalAngleFadeSupported: 1
     - _DecalMeshBiasType: 0
     - _DecalMeshDepthBias: 0
     - _DecalMeshViewBias: 0

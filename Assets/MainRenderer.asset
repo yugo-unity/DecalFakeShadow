@@ -94,9 +94,6 @@ MonoBehaviour:
   characterLayer:
     serializedVersion: 2
     m_Bits: 64
-  fakeShadowLayer:
-    serializedVersion: 2
-    m_Bits: 192
   fakeShadowShader: {fileID: 4800000, guid: 45b2d29dd53159e44b9d21ec63d25600, type: 3}
   maxShadowCount: 4
   decalMapSize: 512

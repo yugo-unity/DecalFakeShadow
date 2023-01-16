@@ -8,6 +8,7 @@ Shader "UTJ/FakeShadowByDecal"
         //[NoScaleOffset] Base_Map("Base Map", 2D) = "white" {} // _DecalTexture‚Å”ò‚ñ‚Å‚­‚é
         _Base_Color("Base Color", Color) = (0, 0, 0, 0)
         //[HideInInspector]_DrawOrder("Draw Order", Range(-50, 50)) = 0
+        [Toggle(DECAL_ANGLE_FADE)]_DecalAngleFadeSupported("Decal Angle Fade Supported", Float) = 1
         //[HideInInspector][NoScaleOffset]unity_Lightmaps("unity_Lightmaps", 2DArray) = "" {}
         //[HideInInspector][NoScaleOffset]unity_LightmapsInd("unity_LightmapsInd", 2DArray) = "" {}
         //[HideInInspector][NoScaleOffset]unity_ShadowMasks("unity_ShadowMasks", 2DArray) = "" {}
@@ -70,9 +71,11 @@ Shader "UTJ/FakeShadowByDecal"
 
             #define HAVE_MESH_MODIFICATION
 
-
             #define SHADERPASS SHADERPASS_DECAL_SCREEN_SPACE_PROJECTOR
             #define _MATERIAL_AFFECTS_ALBEDO 1
+
+            // create shader variant
+            #pragma shader_feature_local_fragment DECAL_ANGLE_FADE
 
             // HybridV1InjectedBuiltinProperties: <None>
 

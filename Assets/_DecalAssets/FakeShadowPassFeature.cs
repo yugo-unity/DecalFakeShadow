@@ -1,3 +1,8 @@
+
+#if DEVELOPMENT_BUILD || UNITY_EDITOR
+#define ENABLE_PROFILING
+#endif
+
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Rendering;
@@ -99,10 +104,10 @@ namespace UTJ {
 
             var line = Mathf.Ceil(Mathf.Sqrt(count)); // 累乗でグリッド生成
             this.uvScale = 1f / line; // 0~1
-            var block = 2f / line;      // -1~1
+            var block = 2f / line;    // -1~1
 
             this.indexStack.Clear();
-            for (var i = 0; i < count; ++i) {
+            for (var i = 0; i < this.availableCount; ++i) {
                 var pos = Vector4.zero;
                 pos.x = -1f + block * ((float)i % line + 0.5f);
                 pos.y = 1f - block * (Mathf.Floor((float)i / line) + 0.5f);
@@ -116,8 +121,13 @@ namespace UTJ {
 
             // 現在有効なShadowの更新
             if (this.available.Count > 0) {
-                foreach (var shadow in this.available.Keys)
+                foreach (var shadow in this.available.Keys) {
+                    if (requests.Count >= this.availableCount) {
+                        shadow.Cancel();
+                        continue;
+                    }
                     requests.Push(shadow);
+                }
                 this.available.Clear();
             }
 
@@ -146,7 +156,6 @@ namespace UTJ {
                 } else {
                     req.UpdateUV(this.uvScale, this.matParams[index].uvBias, PROP_ID_OFFSET, this.matParams[index].offset);
                 }
-
             }
         }
         #endregion
@@ -180,7 +189,7 @@ namespace UTJ {
                 return true;
 
             // 上限
-            if (instance.available.Count + requests.Count >= instance.indexStack.Count)
+            if (requests.Count >= instance.indexStack.Count)
                 return false;
 
             requests.Push(shadow);
@@ -205,7 +214,6 @@ namespace UTJ {
 
     public class FakeShadowPassFeature : ScriptableRendererFeature {
         public LayerMask characterLayer = 0;
-        public LayerMask fakeShadowLayer = 0;
         public Shader fakeShadowShader = null;
         [Range(1, FakeShadowManager.SHADOW_LIMIT)]
         public int maxShadowCount = 9; // 3x3
@@ -231,30 +239,31 @@ namespace UTJ {
                 this.renderPassEvent = RenderPassEvent.AfterRenderingPrePasses; // 
                 this.renderStateBlock = new RenderStateBlock(RenderStateMask.Nothing);
 
+#if ENABLE_PROFILING
                 base.profilingSampler = new ProfilingSampler("Character - Depth Pass");
+#endif
             }
 
             public override void OnCameraSetup(CommandBuffer cmd, ref RenderingData renderingData) {
-                //if (this.useDepthPriming && (renderingData.cameraData.renderType == CameraRenderType.Base || renderingData.cameraData.clearDepth))
-                    ConfigureTarget(renderingData.cameraData.renderer.cameraDepthTarget); // DepthAttachmentに書いてからコピー
-                //else
-                //    ConfigureTarget(depthAttachmentHandle.Identifier()); // Depth Textureに別で書く
+                ConfigureTarget(renderingData.cameraData.renderer.cameraDepthTarget);
             }
 
             public override void Execute(ScriptableRenderContext context, ref RenderingData renderingData) {
+#if ENABLE_PROFILING
                 var cmd = CommandBufferPool.Get();
-
                 using (new ProfilingScope(cmd, this.profilingSampler)) {
                     context.ExecuteCommandBuffer(cmd);
                     cmd.Clear();
-
+#endif
                     var depthDrawSettings = CreateDrawingSettings(SHADER_TAG_ID, ref renderingData, SortingCriteria.CommonOpaque);
                     depthDrawSettings.perObjectData = PerObjectData.None;
                     var depthFilteringSettings = new FilteringSettings(RenderQueueRange.opaque, this.layerMask);
                     context.DrawRenderers(renderingData.cullResults, ref depthDrawSettings, ref depthFilteringSettings, ref this.renderStateBlock);
+#if ENABLE_PROFILING
                 }
                 context.ExecuteCommandBuffer(cmd);
                 CommandBufferPool.Release(cmd);
+#endif
             }
         }
         #endregion
@@ -276,7 +285,9 @@ namespace UTJ {
                 this.renderPassEvent = RenderPassEvent.AfterRenderingPrePasses;
                 this.renderStateBlock = new RenderStateBlock(RenderStateMask.Nothing);
 
+#if ENABLE_PROFILING
                 base.profilingSampler = new ProfilingSampler("Character - FakeShadow Pass");
+#endif
             }
 
             public override void OnCameraSetup(CommandBuffer cmd, ref RenderingData renderingData) {
@@ -290,19 +301,21 @@ namespace UTJ {
             }
 
             public override void Execute(ScriptableRenderContext context, ref RenderingData renderingData) {
+#if ENABLE_PROFILING
                 var cmd = CommandBufferPool.Get();
-
                 using (new ProfilingScope(cmd, this.profilingSampler)) {
                     context.ExecuteCommandBuffer(cmd);
                     cmd.Clear();
-
+#endif
                     // DecalをGPU Instancingする為にDecal Map一つにグリッドで描画する
                     var drawSettings = CreateDrawingSettings(FAKE_SHADER_TAG_ID, ref renderingData, SortingCriteria.OptimizeStateChanges);
                     var filteringSettings = new FilteringSettings(RenderQueueRange.opaque, this.layerMask);
                     context.DrawRenderers(renderingData.cullResults, ref drawSettings, ref filteringSettings, ref this.renderStateBlock);
+#if ENABLE_PROFILING
                 }
                 context.ExecuteCommandBuffer(cmd);
                 CommandBufferPool.Release(cmd);
+#endif
             }
             public override void OnCameraCleanup(CommandBuffer cmd) {
                 if (cmd == null) {
@@ -327,10 +340,12 @@ namespace UTJ {
             private RenderStateBlock renderStateBlock;
 
             public CharacterOpaquePass() {
-                this.renderPassEvent = RenderPassEvent.AfterRenderingSkybox; // DecalPassの後
+                this.renderPassEvent = RenderPassEvent.AfterRenderingSkybox; // after DecalPass
                 this.renderStateBlock = new RenderStateBlock(RenderStateMask.Nothing);
 
+#if ENABLE_PROFILING
                 base.profilingSampler = new ProfilingSampler("Character - Opaque Pass");
+#endif
             }
 
             public override void OnCameraSetup(CommandBuffer cmd, ref RenderingData renderingData) {
@@ -344,22 +359,23 @@ namespace UTJ {
             }
 
             public override void Execute(ScriptableRenderContext context, ref RenderingData renderingData) {
+#if ENABLE_PROFILING
                 var cmd = CommandBufferPool.Get();
-
                 using (new ProfilingScope(cmd, this.profilingSampler)) {
                     context.ExecuteCommandBuffer(cmd);
                     cmd.Clear();
-
+#endif
                     var sortFlags = renderingData.cameraData.defaultOpaqueSortFlags;
                     if (this.useDepthPriming)
                         sortFlags = SortingCriteria.SortingLayer | SortingCriteria.RenderQueue | SortingCriteria.OptimizeStateChanges;
                     var drawSettings = CreateDrawingSettings(SHADER_TAG_ID, ref renderingData, sortFlags);
                     var filteringSettings = new FilteringSettings(RenderQueueRange.opaque, this.layerMask);
                     context.DrawRenderers(renderingData.cullResults, ref drawSettings, ref filteringSettings, ref this.renderStateBlock);
+#if ENABLE_PROFILING
                 }
-
                 context.ExecuteCommandBuffer(cmd);
                 CommandBufferPool.Release(cmd);
+#endif
             }
         }
         #endregion
@@ -393,6 +409,7 @@ namespace UTJ {
         public override void AddRenderPasses(ScriptableRenderer renderer, ref RenderingData renderingData) {
             // Decalを利用するのでDepth Textureは必ずあるという前提
             // 本サンプルはDepth Priming有効で期待しているので決め打ちにしてもいい
+            // ATTENTION: Not supported the case that chaging DepthPrimingMode in runtime when available shadows exist.
             var useDepthPriming = (bool)this.propUseDepthPriming.GetValue(renderingData.cameraData.renderer);
 
 #if UNITY_EDITOR
@@ -403,18 +420,17 @@ namespace UTJ {
                 Debug.LogError("not supported \"Depth Texture Mode\" to \"Force Prepass\" in URP Asset");
 #endif
 
-            // ランタイムで変更できるよう
+            // support to modify in runtime
             this.depthPass.layerMask = this.characterLayer;
             this.opaquePass.layerMask = this.characterLayer;
-
-            this.shadowPass.layerMask = this.fakeShadowLayer;
+            this.shadowPass.layerMask = this.characterLayer;
             this.shadowPass.decalMapSize = this.decalMapSize;
 
             this.opaquePass.useDepthPriming = useDepthPriming;
             if (useDepthPriming)
                 this.depthPass.renderPassEvent = RenderPassEvent.AfterRenderingPrePasses;
             else
-                this.depthPass.renderPassEvent = RenderPassEvent.AfterRenderingOpaques; // CopyDepthの為に書いてあげる必要がある
+                this.depthPass.renderPassEvent = RenderPassEvent.AfterRenderingOpaques; // for CopyDepth
 
             this.fakeShadow.SetAvailableCount(this.maxShadowCount); // 有効数の変更、ランタイムで変更したい場合は要改変、実行数より有効数を減らされた場合の例外対応に注意
             this.fakeShadow.ResolveRequests(); // リクエスト処理
