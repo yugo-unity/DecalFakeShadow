@@ -71,18 +71,17 @@ Shader "UTJ/SimpleLitFakeShadow"
             #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Color.hlsl"
             //#include "Packages/com.unity.render-pipelines.universal/Shaders/SimpleLitInput.hlsl"
 
-// SRP Batcher‘Î‰‚³‚¹‚½‚¢ê‡‚ÍForwardLit/DepthOnly pass‚Ì’è‹`‚Æ‡‚í‚¹‚é•K—v‚ª‚ ‚é
-// ¡‰ñ‚ÍƒTƒ“ƒvƒ‹‚È‚Ì‚Å”ñ‘Î‰
+// SRP Batcherå¯¾å¿œã•ã›ãŸã„å ´åˆã¯ForwardLit/DepthOnly passã®å®šç¾©ã¨åˆã‚ã›ã‚‹å¿…è¦ãŒã‚ã‚‹
+// ä»Šå›ã¯ã‚µãƒ³ãƒ—ãƒ«ãªã®ã§éå¯¾å¿œ
 //CBUFFER_START(UnityPerMaterial)
             float4 _FakeShadowOffset;
+            float4x4 _FakeShadowView;
+            float4x4 _FakeShadowProj;
 //CBUFFER_END
 
             // Global properties
             float _FakeShadowLine;
             half4 _FakeShadowColor;
-            //float4x4 _ModelMat;
-            float4x4 _FakeShadowView;
-            float4x4 _FakeShadowProj;
 
             struct Attributes
             {
@@ -98,17 +97,13 @@ Shader "UTJ/SimpleLitFakeShadow"
             {
                 Varyings output;
 
-                // ƒ‚ƒfƒ‹s—ñ‚Í’PˆÊs—ñ‚È‚Ì‚ÅæZ•s—v
-                //float4 pos = mul(mul(_FakeShadowProj, mul(_FakeShadowView, ModelMat)), float4(input.positionOS.xyz, 1.0));
-                float4 pos = mul(mul(_FakeShadowProj, _FakeShadowView), float4(input.positionOS.xyz, 1.0));
+                float4 pos = mul(mul(_FakeShadowProj, mul(_FakeShadowView, unity_ObjectToWorld)), float4(input.positionOS.xyz, 1));
 
-                // —”ñViewportŒvZ‚É‚æ‚éƒOƒŠƒbƒh‘Î‰
+                // ä¼¼éViewportè¨ˆç®—ã«ã‚ˆã‚‹ã‚°ãƒªãƒƒãƒ‰å¯¾å¿œ
                 pos.xyz /= pos.w;
-                pos.xy /= _FakeShadowLine;      // ƒOƒŠƒbƒh•ªŠ„”‚È‚Ì‚Å0‚ª—ˆ‚é‚±‚Æ‚Í‚È‚¢
-                pos.xy += _FakeShadowOffset.xy; // w’èˆÊ’u
+                pos.xy /= _FakeShadowLine;      // ã‚°ãƒªãƒƒãƒ‰åˆ†å‰²æ•°ãªã®ã§0ãŒæ¥ã‚‹ã“ã¨ã¯ãªã„
+                pos.xy += _FakeShadowOffset.xy; // æŒ‡å®šä½ç½®
                 pos.xyz *= pos.w;
-
-                //pos = mul(UNITY_MATRIX_VP, mul(UNITY_MATRIX_M, float4(input.positionOS.xyz, 1.0)));
 
                 output.positionCS = pos;
 

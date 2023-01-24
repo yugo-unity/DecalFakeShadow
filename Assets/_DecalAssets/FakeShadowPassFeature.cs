@@ -18,11 +18,12 @@ namespace UTJ {
         }
 
         public const int SHADOW_LIMIT = 25; // 1024の16分割で256を限界値として想定
-        static readonly int PROP_ID_LINE = Shader.PropertyToID("_FakeShadowLine");
-        static readonly int PROP_ID_OFFSET = Shader.PropertyToID("_FakeShadowOffset");
-        static readonly int PROP_ID_COLOR = Shader.PropertyToID("_FakeShadowColor");
-        static readonly int PROP_ID_VIEW = Shader.PropertyToID("_FakeShadowView");
-        static readonly int PROP_ID_PROJ = Shader.PropertyToID("_FakeShadowProj");
+        public static readonly int PROP_ID_LINE = Shader.PropertyToID("_FakeShadowLine");
+        public static readonly int PROP_ID_OFFSET = Shader.PropertyToID("_FakeShadowOffset");
+        public static readonly int PROP_ID_COLOR = Shader.PropertyToID("_FakeShadowColor");
+        public static readonly int PROP_ID_VIEW = Shader.PropertyToID("_FakeShadowView");
+        public static readonly int PROP_ID_PROJ = Shader.PropertyToID("_FakeShadowProj");
+        public static readonly Quaternion TOP_ROT = Quaternion.Euler(90f, 0f, 0f);
         #endregion
 
 
@@ -37,6 +38,7 @@ namespace UTJ {
         private Color _color = Color.black;
         private int availableCount = 0;
         #endregion
+
 
         #region MAIN FUNCTION
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterAssembliesLoaded)]
@@ -63,17 +65,6 @@ namespace UTJ {
                     this.materials[i] = new Material(fakeShader);
             }
 
-            var v = Matrix4x4.TRS(
-                new Vector3(0f, 3f, 0f),        // 真上
-                Quaternion.Euler(90f, 0f, 0f),  // 見下ろす
-                new Vector3(1f, 1f, -1f)
-            ).inverse;
-            var p = GL.GetGPUProjectionMatrix(
-                Matrix4x4.Ortho(-1f, 1f, -1f, 1f, 0f, 4f), // -1~1m範囲で奥行4m
-                true
-            );
-            Shader.SetGlobalMatrix(PROP_ID_VIEW, v);
-            Shader.SetGlobalMatrix(PROP_ID_PROJ, p);
             Shader.SetGlobalColor(PROP_ID_COLOR, Color.gray);
             this.SetAvailableCount(availableCount);
         }
@@ -123,6 +114,7 @@ namespace UTJ {
             if (this.available.Count > 0) {
                 foreach (var shadow in this.available.Keys) {
                     if (requests.Count >= this.availableCount) {
+                        Debug.LogError("Canceled FakeShadow. The max count is insufficient.");
                         shadow.Cancel();
                         continue;
                     }
@@ -152,9 +144,9 @@ namespace UTJ {
                         continue;
                     }
 
-                    req.UpdateUV(this.uvScale, this.matParams[index].uvBias, this.materials[index]);
+                    req.UpdateUV(this.uvScale, this.matParams[index].uvBias, this.materials[index], Vector4.zero);
                 } else {
-                    req.UpdateUV(this.uvScale, this.matParams[index].uvBias, PROP_ID_OFFSET, this.matParams[index].offset);
+                    req.UpdateUV(this.uvScale, this.matParams[index].uvBias, null, this.matParams[index].offset);
                 }
             }
         }
