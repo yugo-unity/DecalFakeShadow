@@ -65,6 +65,7 @@ namespace UTJ {
             } else {
                 Debug.LogError("Failed to request for FakeShadow. Increase the max count.");
             }
+            this.projector.enabled = true;
         }
 
         /// <summary>
@@ -74,6 +75,7 @@ namespace UTJ {
             if (this.state.HasFlag(STATE.READY))
                 FakeShadowManager.Return(this);
             this.state = 0;
+            this.projector.enabled = false;
         }
 
         /// <summary>
@@ -129,11 +131,12 @@ namespace UTJ {
                     mat.SetMatrix(FakeShadowManager.PROP_ID_PROJ, this.projection);
                     mat.SetMatrix(FakeShadowManager.PROP_ID_VIEW, view);
                     mat.SetVector(FakeShadowManager.PROP_ID_OFFSET, param.offset);
-                    mat.SetVector(FakeShadowManager.PROP_ID_CLIP, new Vector4(param.uvBias.x, 1f - param.uvBias.y, param.uvScale.x, param.uvScale.y));
+                    mat.SetVector(FakeShadowManager.PROP_ID_CLIP, new Vector4(param.uvBias.x, param.uvBias.y, param.uvScale.x, param.uvScale.y));
                 }
             }
             this.projector.uvScale = param.uvScale;
             this.projector.uvBias = param.uvBias;
+            this.prevClipping = this.glidClipping;
             
             this.state |= STATE.ACTIVE;
         }
