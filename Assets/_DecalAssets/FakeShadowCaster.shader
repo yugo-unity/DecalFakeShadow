@@ -3,6 +3,8 @@ Shader "UTJ/FakeShadowCaster"
     Properties
     {
         [HideInInspector] _FakeShadowOffset("Scale", Vector) = (0, 0, 0, 0)
+        [HideInInspector] _FakeClipRect("Clip", Vector) = (0, 0, 0, 0)
+        [Toggle(FAKE_CLIP)]_FakeClip("Fake Shadow Clipping", Float) = 1
     }
 
     SubShader
@@ -30,8 +32,11 @@ Shader "UTJ/FakeShadowCaster"
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
             #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Color.hlsl"
 
+            #pragma multi_compile_local _ FAKE_CLIP
+
 CBUFFER_START(UnityPerMaterial)
             float4 _FakeShadowOffset;
+            float4 _FakeClipRect;
             float4x4 _FakeShadowView;
             float4x4 _FakeShadowProj;
 CBUFFER_END
@@ -48,6 +53,9 @@ CBUFFER_END
             struct Varyings
             {
                 float4 positionCS : SV_POSITION;
+#ifdef FAKE_CLIP
+                float2 screenPos : TEXCOORD0;
+#endif
             };
 
             Varyings vert(Attributes input)
@@ -64,12 +72,21 @@ CBUFFER_END
 
                 output.positionCS = pos;
 
+#ifdef FAKE_CLIP
+                output.screenPos.xy = ComputeScreenPos(pos).xy;
+#endif
+
                 return output;
             }
 
             half4 frag(Varyings input) : SV_Target
             {
-                return _FakeShadowColor;
+                half4 color = _FakeShadowColor;
+#ifdef FAKE_CLIP
+                clip(step(_FakeClipRect.x, input.screenPos.x)* step(input.screenPos.x, _FakeClipRect.x + _FakeClipRect.z)*
+                    step(_FakeClipRect.y, input.screenPos.y)* step(input.screenPos.y, _FakeClipRect.y + _FakeClipRect.w) - 0.001);
+#endif
+                return color;
             }
             ENDHLSL
         }

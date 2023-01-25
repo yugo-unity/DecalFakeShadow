@@ -43,7 +43,8 @@ Shader "UTJ/SimpleLitFakeShadow"
         [HideInInspector][NoScaleOffset]unity_LightmapsInd("unity_LightmapsInd", 2DArray) = "" {}
         [HideInInspector][NoScaleOffset]unity_ShadowMasks("unity_ShadowMasks", 2DArray) = "" {}
 
-        [ShowAsVector2] _FakeShadowOffset("Scale", Vector) = (0, 0, 0, 0)
+        [HideInInspector] _FakeShadowOffset("Scale", Vector) = (0, 0, 0, 0)
+        [HideInInspector] _FakeClipRect("Clip", Vector) = (0, 0, 0, 0)
     }
     SubShader
     {
@@ -71,10 +72,13 @@ Shader "UTJ/SimpleLitFakeShadow"
             #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Color.hlsl"
             //#include "Packages/com.unity.render-pipelines.universal/Shaders/SimpleLitInput.hlsl"
 
+            #pragma multi_compile_local _ FAKE_CLIP
+
 // SRP Batcher対応させたい場合はForwardLit/DepthOnly passの定義と合わせる必要がある
 // 今回はサンプルなので非対応
 //CBUFFER_START(UnityPerMaterial)
             float4 _FakeShadowOffset;
+            float4 _FakeClipRect;
             float4x4 _FakeShadowView;
             float4x4 _FakeShadowProj;
 //CBUFFER_END
@@ -91,6 +95,9 @@ Shader "UTJ/SimpleLitFakeShadow"
             struct Varyings
             {
                 float4 positionCS : SV_POSITION;
+#ifdef FAKE_CLIP
+                float2 screenPos : TEXCOORD0;
+#endif
             };
 
             Varyings vert(Attributes input)
@@ -107,12 +114,21 @@ Shader "UTJ/SimpleLitFakeShadow"
 
                 output.positionCS = pos;
 
+#ifdef FAKE_CLIP
+                output.screenPos.xy = ComputeScreenPos(pos).xy;
+#endif
+
                 return output;
             }
 
             half4 frag(Varyings input) : SV_Target
             {
-                return _FakeShadowColor;
+                half4 color = _FakeShadowColor;
+#ifdef FAKE_CLIP
+                clip(step(_FakeClipRect.x, input.screenPos.x)* step(input.screenPos.x, _FakeClipRect.x + _FakeClipRect.z)*
+                    step(_FakeClipRect.y, input.screenPos.y)* step(input.screenPos.y, _FakeClipRect.y + _FakeClipRect.w) - 0.001);
+#endif
+                return color;
             }
             ENDHLSL
         }

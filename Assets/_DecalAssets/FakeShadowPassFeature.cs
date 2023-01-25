@@ -10,31 +10,34 @@ using UnityEngine.Rendering.Universal;
 
 namespace UTJ {
     #region FAKE SHADOW
-    public class FakeShadowManager {
+    internal class FakeShadowManager {
         #region DEFINE
-        private struct MatParam {
+        public struct MatParam {
+            public Vector2 uvScale;
             public Vector4 offset;
             public Vector2 uvBias;
+            public Vector4 clipRect;
+            public Material material;
         }
 
         public const int SHADOW_LIMIT = 25; // 1024の16分割で256を限界値として想定
+        public const string CLIP_RECT_KEYWORD = "FAKE_CLIP";
         public static readonly int PROP_ID_LINE = Shader.PropertyToID("_FakeShadowLine");
         public static readonly int PROP_ID_OFFSET = Shader.PropertyToID("_FakeShadowOffset");
         public static readonly int PROP_ID_COLOR = Shader.PropertyToID("_FakeShadowColor");
         public static readonly int PROP_ID_VIEW = Shader.PropertyToID("_FakeShadowView");
         public static readonly int PROP_ID_PROJ = Shader.PropertyToID("_FakeShadowProj");
+        public static readonly int PROP_ID_CLIP = Shader.PropertyToID("_FakeClipRect");
         public static readonly Quaternion TOP_ROT = Quaternion.Euler(90f, 0f, 0f);
         #endregion
 
 
         #region MEMBER
-        private static FakeShadowManager instance = null;
         public static Stack<FakeShadow> requests = new Stack<FakeShadow>(SHADOW_LIMIT);
+        private static FakeShadowManager instance = null;
         private Dictionary<FakeShadow, int> available = new Dictionary<FakeShadow, int>(SHADOW_LIMIT);
         private Stack<int> indexStack = new Stack<int>(SHADOW_LIMIT);
-        private Material[] materials = null;
         private MatParam[] matParams = new MatParam[SHADOW_LIMIT];
-        private float uvScale = 1f;
         private Color _color = Color.black;
         private int availableCount = 0;
         #endregion
@@ -52,7 +55,7 @@ namespace UTJ {
         /// </summary>
         /// <param name="availableCount">上限値</param>
         /// <param name="fakeShader">ShadowMesh用のShader</param>
-        public FakeShadowManager(int availableCount, Shader fakeShader) {
+        internal FakeShadowManager(int availableCount, Shader fakeShader) {
             if (instance != null) {
                 Debug.LogError("FakeShadowManager is duplicated.");
                 return;
@@ -60,9 +63,8 @@ namespace UTJ {
             instance = this;
 
             if (fakeShader != null) {
-                this.materials = new Material[SHADOW_LIMIT];
                 for (var i = 0; i < SHADOW_LIMIT; ++i)
-                    this.materials[i] = new Material(fakeShader);
+                    this.matParams[i].material = new Material(fakeShader);
             }
 
             Shader.SetGlobalColor(PROP_ID_COLOR, Color.gray);
@@ -73,10 +75,9 @@ namespace UTJ {
         /// 破棄
         /// </summary>
         public void Dispose() {
-            if (this.materials != null) {
-                foreach (var mat in this.materials)
-                    Object.DestroyImmediate(mat);
-                this.materials = null;
+            for (var i = 0; i < SHADOW_LIMIT; ++i) {
+                Object.DestroyImmediate(this.matParams[i].material);
+                this.matParams[i].material = null;
             }
             this.available.Clear();
             this.indexStack.Clear();
@@ -94,20 +95,27 @@ namespace UTJ {
             this.availableCount = count;
 
             var line = Mathf.Ceil(Mathf.Sqrt(count)); // 累乗でグリッド生成
-            this.uvScale = 1f / line; // 0~1
+            var uvScale = 1f / line; // 0~1
             var block = 2f / line;    // -1~1
 
             this.indexStack.Clear();
             for (var i = 0; i < this.availableCount; ++i) {
+                // 描画位置、グリッドの中点
                 var pos = Vector4.zero;
                 pos.x = -1f + block * ((float)i % line + 0.5f);
                 pos.y = 1f - block * (Mathf.Floor((float)i / line) + 0.5f);
+                var uvBias = new Vector2(uvScale * Mathf.Floor((float)i % line), uvScale * Mathf.Floor((float)i / line));
+                var clipRect = new Vector4(uvBias.x, 1f - uvBias.y, uvScale, uvScale);
 
                 this.indexStack.Push(i);
-                if (this.materials != null)
-                    this.materials[i].SetVector(PROP_ID_OFFSET, pos);
+                if (this.matParams[i].material != null) {
+                    this.matParams[i].material.SetVector(PROP_ID_OFFSET, pos);
+                    this.matParams[i].material.SetVector(PROP_ID_CLIP, clipRect);
+                }
+                this.matParams[i].uvScale = new Vector2(uvScale, uvScale);
                 this.matParams[i].offset = pos;
-                this.matParams[i].uvBias = new Vector2(this.uvScale * Mathf.Floor((float)i % line), this.uvScale * Mathf.Floor((float)i / line));
+                this.matParams[i].uvBias = uvBias;
+                this.matParams[i].clipRect = clipRect;
             }
 
             // 現在有効なShadowの更新
@@ -115,7 +123,7 @@ namespace UTJ {
                 foreach (var shadow in this.available.Keys) {
                     if (requests.Count >= this.availableCount) {
                         Debug.LogError("Canceled FakeShadow. The max count is insufficient.");
-                        shadow.Cancel();
+                        shadow.Sleep();
                         continue;
                     }
                     requests.Push(shadow);
@@ -138,16 +146,13 @@ namespace UTJ {
 
                 // SkinnedMeshはMeshRendererを分けずにSubMeshの方がオーバーヘッドが低いのでMulti Renderer対応はしない
                 if (req.isShadowMesh) {
-                    if (instance.materials == null) {
+                    if (this.matParams[index].material == null) {
                         Return(req);
                         Debug.LogError("Not supported FakeShadow by ShadowMesh. Need the Shader.");
                         continue;
                     }
-
-                    req.UpdateUV(this.uvScale, this.matParams[index].uvBias, this.materials[index], Vector4.zero);
-                } else {
-                    req.UpdateUV(this.uvScale, this.matParams[index].uvBias, null, this.matParams[index].offset);
                 }
+                req.Setup(in this.matParams[index]);
             }
         }
         #endregion
