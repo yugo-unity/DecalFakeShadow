@@ -7,11 +7,10 @@ namespace UTJ {
     /// DecalProjectorを利用したトップビューの疑似影
     /// </summary>
     public class FakeShadow : MonoBehaviour {
-        [SerializeField, Tooltip("Shadow Mesh用か")]
-        bool shadowMesh = false;
-
-        [Tooltip("OnEnableで自動")]
-        public bool activeOnEnable = true;
+        [Tooltip("Shadow Mesh用か")]
+        public bool shadowMesh = false;
+        [Tooltip("OnEnableで自動起動")]
+        public bool activeOnEnable = false;
         [Tooltip("DecalProjector範囲からはみ出た部分をClipするか")]
         public bool glidClipping = false;
         [Tooltip("対応するDecal Projector参照")]
@@ -20,8 +19,8 @@ namespace UTJ {
         [System.Flags]
         private enum STATE {
             NONE,
-            READY, // リクエスト済で
-            ACTIVE,
+            REQUEST,    // リクエスト済
+            AVAIRABLE,  // 設定済
         }
 
         private new Renderer renderer = null;
@@ -35,15 +34,8 @@ namespace UTJ {
         private UnityEngine.Rendering.LocalKeyword clipKeyword;
 
         internal bool isShadowMesh { get => this.shadowMesh; }
+        internal bool isRequested { get => this.state.HasFlag(STATE.REQUEST); }
 
-        void Start() {
-            if (this.renderer == null)
-                this.renderer = this.GetComponent<Renderer>();
-            if (this.root == null)
-                this.root = this.projector.transform;
-
-            this.prevClipping = this.glidClipping;
-        }
         void OnEnable() {
             if (this.activeOnEnable)
                 this.Wakeup();
@@ -58,31 +50,46 @@ namespace UTJ {
         public void Wakeup() {
             Debug.Assert(this.projector != null, "Set the reference of DecalProjector");
 
+            if (this.renderer == null)
+                this.renderer = this.GetComponent<Renderer>();
+            if (this.root == null)
+                this.root = this.projector.transform;
+
             var ret = FakeShadowManager.Request(this);
             if (ret) {
                 this.isSkinned = this.renderer is SkinnedMeshRenderer;
-                this.state |= STATE.READY;
+                this.state |= STATE.REQUEST;
+                this.projector.enabled = true;
             } else {
                 Debug.LogError("Failed to request for FakeShadow. Increase the max count.");
+                this.projector.enabled = false;
             }
-            this.projector.enabled = true;
         }
 
         /// <summary>
         /// 停止
         /// </summary>
         public void Sleep() {
-            if (this.state.HasFlag(STATE.READY))
+            if (this.state.HasFlag(STATE.AVAIRABLE))
                 FakeShadowManager.Return(this);
-            this.state = 0;
+            this.state = 0; // cleared REQUEST/AVAIRABLE
             this.projector.enabled = false;
+
+            // NOTE: Lit(Instance)が暗黙で与えられるのでやらない
+            //var materials = this.renderer.materials;
+            //for (var i = 0; i < materials.Length; ++i)
+            //    materials[i] = null;
+            //this.renderer.materials = materials;
+
+            //this.mat = null;
+            //this.paramIndex = -1;
         }
 
         /// <summary>
         /// パラメータ更新
         /// </summary>
         void LateUpdate() {
-            if (!this.state.HasFlag(STATE.ACTIVE))
+            if (!this.state.HasFlag(STATE.AVAIRABLE))
                 return;
             var updated = this.UpdateProjection();
             updated |= this.prevClipping != this.glidClipping;
@@ -90,12 +97,16 @@ namespace UTJ {
                 return;
 
             this.prevClipping = this.glidClipping;
-            this.CalcViewMatrix(out var view);
+            var view = this.root.worldToLocalMatrix;
             foreach (var mat in this.renderer.materials) {
                 mat.SetKeyword(this.clipKeyword, this.glidClipping);
                 mat.SetMatrix(FakeShadowManager.PROP_ID_PROJ, this.projection);
                 mat.SetMatrix(FakeShadowManager.PROP_ID_VIEW, view);
             }
+
+            // for Debug
+            //if (this.mat != this.renderer.material)
+            //    Debug.LogError("do not set the material from external");
         }
 
         /// <summary>
@@ -104,14 +115,14 @@ namespace UTJ {
         /// </summary>
         /// <param name="param">設定パラメータ</param>
         internal void Setup(in FakeShadowManager.MatParam param) {
-            if (!this.state.HasFlag(STATE.READY))
+            if (!this.state.HasFlag(STATE.REQUEST))
                 return;
 
             this.UpdateProjection(force : true);
-            this.CalcViewMatrix(out var view);
+            var view = this.root.worldToLocalMatrix;
 
-            if (this.isShadowMesh) {
-                var materials = this.renderer.sharedMaterials;
+            if (this.shadowMesh) {
+                var materials = this.renderer.materials;
                 for (var i = 0; i < materials.Length; ++i)
                     materials[i] = param.material;
                 this.renderer.materials = materials;
@@ -131,15 +142,21 @@ namespace UTJ {
                     mat.SetMatrix(FakeShadowManager.PROP_ID_PROJ, this.projection);
                     mat.SetMatrix(FakeShadowManager.PROP_ID_VIEW, view);
                     mat.SetVector(FakeShadowManager.PROP_ID_OFFSET, param.offset);
-                    mat.SetVector(FakeShadowManager.PROP_ID_CLIP, new Vector4(param.uvBias.x, param.uvBias.y, param.uvScale.x, param.uvScale.y));
+                    mat.SetVector(FakeShadowManager.PROP_ID_CLIP, param.clipRect);
                 }
             }
             this.projector.uvScale = param.uvScale;
             this.projector.uvBias = param.uvBias;
             this.prevClipping = this.glidClipping;
-            
-            this.state |= STATE.ACTIVE;
+
+            ////this.mat = param.material;
+            //this.mat = this.renderer.material;
+            //this.paramIndex = param.index;
+
+            this.state |= STATE.AVAIRABLE;
         }
+        //Material mat;
+        //int paramIndex = -1;
 
         /// <summary>
         /// Projection行列の更新
@@ -161,17 +178,6 @@ namespace UTJ {
             this.prevSize = size;
 
             return true;
-        }
-
-        /// <summary>
-        /// View行列の更新
-        /// </summary>
-        private void CalcViewMatrix(out Matrix4x4 view) {
-            view = Matrix4x4.TRS(
-                this.root.position,         // centering
-                FakeShadowManager.TOP_ROT,  // top view
-                new Vector3(1f, 1f, -1f)
-            ).inverse;
         }
     }
 }

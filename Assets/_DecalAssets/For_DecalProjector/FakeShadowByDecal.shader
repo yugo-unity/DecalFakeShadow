@@ -1,11 +1,11 @@
 
-// ShaderGraph‚ÌDecalƒVƒF[ƒ_[‚©‚çFake Shadow‚É•K—v‚È‚à‚Ì‚Ì‚İ‚Éí‚¬—‚·
-// TODO : Normal‚Æ‚©í‚è—‚Æ‚µ‚½‚¢‚ª–{‹Ø‚Æˆí‚ê‚é‚½‚ß’†’f...
+// ShaderGraphã®Decalã‚·ã‚§ãƒ¼ãƒ€ãƒ¼ã‹ã‚‰Fake Shadowã«å¿…è¦ãªã‚‚ã®ã®ã¿ã«å‰Šãè½ã™
+// TODO : Normalã¨ã‹å‰Šã‚Šè½ã¨ã—ãŸã„ãŒæœ¬ç­‹ã¨é€¸ã‚Œã‚‹ãŸã‚ä¸­æ–­...
 Shader "UTJ/FakeShadowByDecal"
 {
     Properties
     {
-        //[NoScaleOffset] Base_Map("Base Map", 2D) = "white" {} // _DecalTexture‚Å”ò‚ñ‚Å‚­‚é
+        //[NoScaleOffset] Base_Map("Base Map", 2D) = "white" {} // _DecalTextureã§é£›ã‚“ã§ãã‚‹
         _Base_Color("Base Color", Color) = (0, 0, 0, 0)
         //[HideInInspector]_DrawOrder("Draw Order", Range(-50, 50)) = 0
         [Toggle(DECAL_ANGLE_FADE)]_DecalAngleFadeSupported("Decal Angle Fade Supported", Float) = 1
@@ -199,7 +199,7 @@ Shader "UTJ/FakeShadowByDecal"
             //float _DecalMeshDepthBias;
             //float _DecalMeshViewBias;
             CBUFFER_END
-            float _DecalMeshDepthBias; // g‚Á‚Ä‚È‚¢‚ª’è‹`‚Å•K—v...Constant Buffer‚É‚¢‚ç‚È‚¢‚Ì‚Åo‚·
+            float _DecalMeshDepthBias; // ä½¿ã£ã¦ãªã„ãŒå®šç¾©ã§å¿…è¦...Constant Bufferã«ã„ã‚‰ãªã„ã®ã§å‡ºã™
 
             // Object and Global properties
             SAMPLER(SamplerState_Linear_Repeat);

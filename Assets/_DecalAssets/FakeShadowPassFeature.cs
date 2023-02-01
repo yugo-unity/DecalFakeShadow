@@ -13,6 +13,7 @@ namespace UTJ {
     internal class FakeShadowManager {
         #region DEFINE
         public struct MatParam {
+            public int index;
             public Vector2 uvScale;
             public Vector4 offset;
             public Vector2 uvBias;
@@ -36,6 +37,7 @@ namespace UTJ {
         public static Stack<FakeShadow> requests = new Stack<FakeShadow>(SHADOW_LIMIT);
         private static FakeShadowManager instance = null;
         private Dictionary<FakeShadow, int> available = new Dictionary<FakeShadow, int>(SHADOW_LIMIT);
+        private Stack<FakeShadow> cancels = new Stack<FakeShadow>(SHADOW_LIMIT);
         private Stack<int> indexStack = new Stack<int>(SHADOW_LIMIT);
         private MatParam[] matParams = new MatParam[SHADOW_LIMIT];
         private Color _color = Color.black;
@@ -81,6 +83,7 @@ namespace UTJ {
             }
             this.available.Clear();
             this.indexStack.Clear();
+            requests.Clear();
             instance = null;
         }
 
@@ -105,13 +108,14 @@ namespace UTJ {
                 pos.x = -1f + block * ((float)i % line + 0.5f);
                 pos.y = 1f - block * (Mathf.Floor((float)i / line) + 0.5f);
                 var uvBias = new Vector2(uvScale * Mathf.Floor((float)i % line), uvScale * Mathf.Floor((float)i / line));
-                var clipRect = new Vector4(uvBias.x, 1f - uvBias.y, uvScale, uvScale);
+                var clipRect = new Vector4(uvBias.x, uvBias.y, uvScale, uvScale);
 
                 this.indexStack.Push(i);
                 if (this.matParams[i].material != null) {
                     this.matParams[i].material.SetVector(PROP_ID_OFFSET, pos);
                     this.matParams[i].material.SetVector(PROP_ID_CLIP, clipRect);
                 }
+                this.matParams[i].index = i;
                 this.matParams[i].uvScale = new Vector2(uvScale, uvScale);
                 this.matParams[i].offset = pos;
                 this.matParams[i].uvBias = uvBias;
@@ -122,13 +126,16 @@ namespace UTJ {
             if (this.available.Count > 0) {
                 foreach (var shadow in this.available.Keys) {
                     if (requests.Count >= this.availableCount) {
-                        Debug.LogError("Canceled FakeShadow. The max count is insufficient.");
-                        shadow.Sleep();
+                        Debug.LogError($"Canceled FakeShadow [{shadow.name}]. The max count is insufficient.");
+                        this.cancels.Push(shadow);
                         continue;
                     }
                     requests.Push(shadow);
                 }
                 this.available.Clear();
+                foreach (var shadow in this.cancels)
+                    shadow.Sleep();
+                this.cancels.Clear();
             }
 
             Shader.SetGlobalFloat(PROP_ID_LINE, line);
@@ -140,6 +147,9 @@ namespace UTJ {
         public void ResolveRequests() {
             while (requests.Count > 0) {
                 var req = requests.Pop();
+                // キャンセルされた場合は無視
+                if (!req.isRequested)
+                    continue;
 
                 var index = this.indexStack.Pop();
                 this.available.Add(req, index);
@@ -166,7 +176,7 @@ namespace UTJ {
             get { return instance._color; }
             set {
                 instance._color = value;
-                Shader.SetGlobalColor("_FakeShadowColor", value);
+                Shader.SetGlobalColor(PROP_ID_COLOR, value);
             }
         }
 
@@ -181,13 +191,19 @@ namespace UTJ {
             if (instance == null)
                 return false;
 
-            // リクエスト済
-            if (instance.available.TryGetValue(shadow, out var index))
+            if (instance.available.ContainsKey(shadow)) {
+                Debug.LogError("Already available");
                 return true;
-
+            }
+            if (requests.Contains(shadow)) {
+                Debug.LogError("Duplicated to request");
+                return true;
+            }
             // 上限
-            if (requests.Count >= instance.indexStack.Count)
+            if (requests.Count >= instance.indexStack.Count) {
+                Debug.LogError("Over requests");
                 return false;
+            }
 
             requests.Push(shadow);
             return true;
@@ -197,13 +213,16 @@ namespace UTJ {
         /// インデックス返却
         /// </summary>
         /// <param name="index">Requestで取得したインデックス</param>
-        public static void Return(FakeShadow shadow) {
+        public static bool Return(FakeShadow shadow) {
             if (instance == null || shadow == null)
-                return;
+                return false;
             if (instance.available.TryGetValue(shadow, out var index)) {
                 instance.indexStack.Push(index);
                 instance.available.Remove(shadow);
+                return true;
             }
+            Debug.LogError("Not found to return");
+            return false;
         }
         #endregion
     }
@@ -398,7 +417,7 @@ namespace UTJ {
             this.depthPass = null;
             this.shadowPass = null;
             this.opaquePass = null;
-            this.fakeShadow.Dispose();
+            this.fakeShadow?.Dispose();
             this.fakeShadow = null;
             this.propUseDepthPriming = null;
         }

@@ -273,6 +273,8 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   shadowMesh: 0
+  activeOnEnable: 1
+  glidClipping: 1
   projector: {fileID: 1249848018}
 --- !u!4 &149619934 stripped
 Transform:
@@ -1528,6 +1530,8 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   shadowMesh: 0
+  activeOnEnable: 1
+  glidClipping: 0
   projector: {fileID: 1110683514}
 --- !u!1 &1249848016
 GameObject:
@@ -1582,7 +1586,7 @@ MonoBehaviour:
   m_UVBias: {x: 0, y: 0}
   m_ScaleMode: 0
   m_Offset: {x: 0, y: 0, z: 0}
-  m_Size: {x: 3, y: 3, z: 4}
+  m_Size: {x: 1, y: 1, z: 4}
   m_FadeFactor: 1
 --- !u!4 &1299211301 stripped
 Transform:
@@ -1670,6 +1674,8 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   shadowMesh: 1
+  activeOnEnable: 1
+  glidClipping: 0
   projector: {fileID: 1884424828}
 --- !u!137 &1504856034
 SkinnedMeshRenderer:

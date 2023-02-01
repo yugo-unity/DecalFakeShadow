@@ -23,6 +23,7 @@ Material:
   m_Name: SimpleLitFakeShadow
   m_Shader: {fileID: 4800000, guid: c960ba020e9103d4c9fd043b2e100db8, type: 3}
   m_ValidKeywords:
+  - FAKE_CLIP
   - _GLOSSINESS_FROM_BASE_ALPHA
   - _SPECULAR_COLOR
   m_InvalidKeywords: []
@@ -105,6 +106,7 @@ Material:
     - _DetailNormalMapScale: 1
     - _DstBlend: 0
     - _EnvironmentReflections: 1
+    - _FakeClip: 1
     - _GlossMapScale: 0
     - _Glossiness: 0
     - _GlossinessSource: 0
@@ -129,6 +131,7 @@ Material:
     - _BaseColor: {r: 0.5, g: 0.5, b: 0.5, a: 0.5}
     - _Color: {r: 0.5, g: 0.5, b: 0.5, a: 0.5}
     - _EmissionColor: {r: 0, g: 0, b: 0, a: 1}
+    - _FakeClipRect: {r: 0, g: 0, b: 0, a: 0}
     - _FakeShadowOffset: {r: 0, g: 0, b: 0, a: 0}
     - _Offset: {r: 0, g: 0, b: 0, a: 0}
     - _ShadowColor: {r: 1, g: 1, b: 1, a: 1}
