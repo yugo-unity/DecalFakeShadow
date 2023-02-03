@@ -34,7 +34,7 @@ namespace UTJ {
 
 
         #region MEMBER
-        public static Stack<FakeShadow> requests = new Stack<FakeShadow>(SHADOW_LIMIT);
+        private static Stack<FakeShadow> requests = new Stack<FakeShadow>(SHADOW_LIMIT);
         private static FakeShadowManager instance = null;
         private Dictionary<FakeShadow, int> available = new Dictionary<FakeShadow, int>(SHADOW_LIMIT);
         private Stack<FakeShadow> cancels = new Stack<FakeShadow>(SHADOW_LIMIT);
@@ -42,6 +42,7 @@ namespace UTJ {
         private MatParam[] matParams = new MatParam[SHADOW_LIMIT];
         private Color _color = Color.black;
         private int availableCount = 0;
+        private float mapSize = 1f;
         #endregion
 
 
@@ -55,9 +56,8 @@ namespace UTJ {
         /// <summary>
         /// 初期化
         /// </summary>
-        /// <param name="availableCount">上限値</param>
         /// <param name="fakeShader">ShadowMesh用のShader</param>
-        internal FakeShadowManager(int availableCount, Shader fakeShader) {
+        internal FakeShadowManager(Shader fakeShader) {
             if (instance != null) {
                 Debug.LogError("FakeShadowManager is duplicated.");
                 return;
@@ -70,13 +70,14 @@ namespace UTJ {
             }
 
             Shader.SetGlobalColor(PROP_ID_COLOR, Color.gray);
-            this.SetAvailableCount(availableCount);
+            this.availableCount = 0;
+            this.mapSize = 1;
         }
 
         /// <summary>
         /// 破棄
         /// </summary>
-        public void Dispose() {
+        internal void Dispose() {
             for (var i = 0; i < SHADOW_LIMIT; ++i) {
                 Object.DestroyImmediate(this.matParams[i].material);
                 this.matParams[i].material = null;
@@ -91,15 +92,19 @@ namespace UTJ {
         /// 上限設定
         /// </summary>
         /// <param name="count">上限値</param>
-        public void SetAvailableCount(int count) {
-            if (this.availableCount == count)
+        /// <param name="decalMapSize">Decal Shadowバッファの解像度</param>
+        internal void SetAvailableCount(int count, float decalMapSize) {
+            if (this.availableCount == count && this.mapSize == decalMapSize)
                 return;
 
             this.availableCount = count;
+            this.mapSize = decalMapSize;
 
             var line = Mathf.Ceil(Mathf.Sqrt(count)); // 累乗でグリッド生成
             var uvScale = 1f / line; // 0~1
             var block = 2f / line;    // -1~1
+            var onePixel = 1f / decalMapSize;
+            var onePixelx2 = 2f / decalMapSize;
 
             this.indexStack.Clear();
             for (var i = 0; i < this.availableCount; ++i) {
@@ -108,7 +113,8 @@ namespace UTJ {
                 pos.x = -1f + block * ((float)i % line + 0.5f);
                 pos.y = 1f - block * (Mathf.Floor((float)i / line) + 0.5f);
                 var uvBias = new Vector2(uvScale * Mathf.Floor((float)i % line), uvScale * Mathf.Floor((float)i / line));
-                var clipRect = new Vector4(uvBias.x, uvBias.y, uvScale, uvScale);
+                // Bilinerによってはみ出してくるので1pix内側で切る
+                var clipRect = new Vector4(uvBias.x + onePixel, uvBias.y + onePixel, uvScale - onePixelx2, uvScale - onePixelx2);
 
                 this.indexStack.Push(i);
                 if (this.matParams[i].material != null) {
@@ -144,12 +150,20 @@ namespace UTJ {
         /// <summary>
         /// 新規リクエストの対応
         /// </summary>
-        public void ResolveRequests() {
+        internal void ResolveRequests() {
             while (requests.Count > 0) {
                 var req = requests.Pop();
                 // キャンセルされた場合は無視
                 if (!req.isRequested)
                     continue;
+                if (this.available.ContainsKey(req)) {
+                    Debug.LogError($"Already available : {req.name}");
+                    continue;
+                }
+                if (requests.Count >= this.indexStack.Count) {
+                    Debug.LogError($"Over requests : {req.name}");
+                    continue;
+                }
 
                 var index = this.indexStack.Pop();
                 this.available.Add(req, index);
@@ -181,28 +195,14 @@ namespace UTJ {
         }
 
         /// <summary>
-        /// インデックス取得
+        /// 有効リクエスト
         /// </summary>
-        /// <param name="renderer">SkinnedMeshRenderer</param>
-        /// <param name="uvScale">DecalProjectorに渡す値</param>
-        /// <param name="uvBias">DecalProjectorに渡す値</param>
-        /// <returns>貸与されたインデックス</returns>
+        /// <param name="shadow">FakeShadowインスタンス</param>
+        /// <returns>完了</returns>
         public static bool Request(FakeShadow shadow) {
-            if (instance == null)
-                return false;
-
-            if (instance.available.ContainsKey(shadow)) {
-                Debug.LogError("Already available");
-                return true;
-            }
             if (requests.Contains(shadow)) {
                 Debug.LogError("Duplicated to request");
                 return true;
-            }
-            // 上限
-            if (requests.Count >= instance.indexStack.Count) {
-                Debug.LogError("Over requests");
-                return false;
             }
 
             requests.Push(shadow);
@@ -407,7 +407,7 @@ namespace UTJ {
             this.shadowPass = new CharacterShadowPass();
             this.opaquePass = new CharacterOpaquePass();
 
-            this.fakeShadow = new FakeShadowManager(maxShadowCount, this.fakeShadowShader);
+            this.fakeShadow = new FakeShadowManager(this.fakeShadowShader);
 
             var universalRendererType = typeof(UniversalRenderer);
             this.propUseDepthPriming = universalRendererType.GetProperty("useDepthPriming", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
@@ -448,7 +448,7 @@ namespace UTJ {
             else
                 this.depthPass.renderPassEvent = RenderPassEvent.AfterRenderingOpaques; // for CopyDepth
 
-            this.fakeShadow.SetAvailableCount(this.maxShadowCount); // 有効数の変更、ランタイムで変更したい場合は要改変、実行数より有効数を減らされた場合の例外対応に注意
+            this.fakeShadow.SetAvailableCount(this.maxShadowCount, this.decalMapSize); // 有効数の変更、ランタイムで変更したい場合は要改変、実行数より有効数を減らされた場合の例外対応に注意
             this.fakeShadow.ResolveRequests(); // リクエスト処理
 
             renderer.EnqueuePass(this.depthPass);

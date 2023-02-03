@@ -30,6 +30,7 @@ namespace UTJ {
 
         private bool prevClipping = false;
         private Vector3 prevSize = Vector3.zero;
+        private Vector3 prevPivot = Vector3.zero;
         private Matrix4x4 projection = Matrix4x4.identity;
         private UnityEngine.Rendering.LocalKeyword clipKeyword;
 
@@ -80,9 +81,6 @@ namespace UTJ {
             //for (var i = 0; i < materials.Length; ++i)
             //    materials[i] = null;
             //this.renderer.materials = materials;
-
-            //this.mat = null;
-            //this.paramIndex = -1;
         }
 
         /// <summary>
@@ -97,16 +95,15 @@ namespace UTJ {
                 return;
 
             this.prevClipping = this.glidClipping;
-            var view = this.root.worldToLocalMatrix;
+            // Scaleはモデル行列に反映されるのでView行列でつぶさない
+            //var view = this.root.worldToLocalMatrix;
+            var view = Matrix4x4.TRS(this.root.position, this.root.rotation, Vector3.one).inverse;
+
             foreach (var mat in this.renderer.materials) {
                 mat.SetKeyword(this.clipKeyword, this.glidClipping);
                 mat.SetMatrix(FakeShadowManager.PROP_ID_PROJ, this.projection);
                 mat.SetMatrix(FakeShadowManager.PROP_ID_VIEW, view);
             }
-
-            // for Debug
-            //if (this.mat != this.renderer.material)
-            //    Debug.LogError("do not set the material from external");
         }
 
         /// <summary>
@@ -149,14 +146,8 @@ namespace UTJ {
             this.projector.uvBias = param.uvBias;
             this.prevClipping = this.glidClipping;
 
-            ////this.mat = param.material;
-            //this.mat = this.renderer.material;
-            //this.paramIndex = param.index;
-
             this.state |= STATE.AVAIRABLE;
         }
-        //Material mat;
-        //int paramIndex = -1;
 
         /// <summary>
         /// Projection行列の更新
@@ -165,17 +156,19 @@ namespace UTJ {
         /// <returns>updated</returns>
         private bool UpdateProjection(bool force = false) {
             var size = this.projector.size;
-            if (!force && this.prevSize == size)
+            var pivot = this.projector.pivot;
+            if (!force && this.prevSize == size && this.prevPivot == pivot)
                 return false;
 
             var width = size.x * 0.5f;
             var height = size.y * 0.5f;
-            // NOTE: rangeは必要十分な値でハードコードしてもいい、サンプルではBoundingBoxにて判断
-            var range = this.renderer.bounds.max.magnitude;
+            // NOTE: rangeは必要十分な値でハードコードしてもいい
+            var range = (size.z + this.projector.pivot.magnitude);
             this.projection = GL.GetGPUProjectionMatrix(
                 Matrix4x4.Ortho(-width, width, -height, height, -range, range), true
             );
             this.prevSize = size;
+            this.prevPivot = pivot;
 
             return true;
         }
