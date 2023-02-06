@@ -160,8 +160,9 @@ namespace UTJ {
                     Debug.LogError($"Already available : {req.name}");
                     continue;
                 }
-                if (requests.Count >= this.indexStack.Count) {
+                if (this.indexStack.Count == 0) {
                     Debug.LogError($"Over requests : {req.name}");
+                    req.Sleep();
                     continue;
                 }
 
