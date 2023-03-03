@@ -1,17 +1,12 @@
 
 // ShaderGraphのDecalシェーダーからFake Shadowに必要なもののみに削ぎ落す
-// TODO : Normalとか削り落としたいが本筋と逸れるため中断...
 Shader "UTJ/FakeShadowByDecal"
 {
     Properties
     {
         //[NoScaleOffset] Base_Map("Base Map", 2D) = "white" {} // _DecalTextureで飛んでくる
         _Base_Color("Base Color", Color) = (0, 0, 0, 0)
-        //[HideInInspector]_DrawOrder("Draw Order", Range(-50, 50)) = 0
         [Toggle(DECAL_ANGLE_FADE)]_DecalAngleFadeSupported("Decal Angle Fade Supported", Float) = 1
-        //[HideInInspector][NoScaleOffset]unity_Lightmaps("unity_Lightmaps", 2DArray) = "" {}
-        //[HideInInspector][NoScaleOffset]unity_LightmapsInd("unity_LightmapsInd", 2DArray) = "" {}
-        //[HideInInspector][NoScaleOffset]unity_ShadowMasks("unity_ShadowMasks", 2DArray) = "" {}
     }
     SubShader
     {
@@ -21,8 +16,6 @@ Shader "UTJ/FakeShadowByDecal"
             // RenderType: <None>
             "PreviewType" = "Plane"
             // Queue: <None>
-            "ShaderGraphShader" = "true"
-            "ShaderGraphTargetId" = ""
         }
         Pass
         {
@@ -51,49 +44,18 @@ Shader "UTJ/FakeShadowByDecal"
             #pragma vertex Vert
             #pragma fragment Frag
             #pragma multi_compile_instancing
-            //#pragma multi_compile_fog
             #pragma editor_sync_compilation
-
-
-            #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Common.hlsl"
-            #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Texture.hlsl"
-
-            // Defines
-            #define ATTRIBUTES_NEED_NORMAL
-            #define ATTRIBUTES_NEED_TEXCOORD0
-            #define VARYINGS_NEED_NORMAL_WS
-            #define VARYINGS_NEED_VIEWDIRECTION_WS
-            #define VARYINGS_NEED_TEXCOORD0
-            #define VARYINGS_NEED_FOG_AND_VERTEX_LIGHT
-            #define VARYINGS_NEED_SH
-            #define VARYINGS_NEED_STATIC_LIGHTMAP_UV
-            #define VARYINGS_NEED_DYNAMIC_LIGHTMAP_UV
-
-            #define HAVE_MESH_MODIFICATION
-
-            #define SHADERPASS SHADERPASS_DECAL_SCREEN_SPACE_PROJECTOR
-            #define _MATERIAL_AFFECTS_ALBEDO 1
 
             // create shader variant
             #pragma shader_feature_local_fragment DECAL_ANGLE_FADE
 
-            // HybridV1InjectedBuiltinProperties: <None>
-
-            //// -- Properties used by ScenePickingPass
-            //#ifdef SCENEPICKINGPASS
-            //float4 _SelectionID;
-            //#endif
-
             // Includes
-            #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Color.hlsl"
+            #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Common.hlsl"
             #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Texture.hlsl"
-            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
-            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Lighting.hlsl"
-            #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/TextureStack.hlsl"
-            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/ShaderGraphFunctions.hlsl"
-            #include "Packages/com.unity.render-pipelines.universal/Editor/ShaderGraph/Includes/ShaderPass.hlsl"
-            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DecalInput.hlsl"
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Input.hlsl"
             #include "Packages/com.unity.render-pipelines.universal/Editor/ShaderGraph/Includes/ShaderVariablesDecal.hlsl"
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DeclareDepthTexture.hlsl"
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/NormalReconstruction.hlsl"
 
             // --------------------------------------------------
             // Structs and Packing
@@ -101,52 +63,26 @@ Shader "UTJ/FakeShadowByDecal"
             struct Attributes
             {
                  float3 positionOS : POSITION;
-                 float3 normalOS : NORMAL;
                  float4 uv0 : TEXCOORD0;
-                #if UNITY_ANY_INSTANCING_ENABLED
+#if UNITY_ANY_INSTANCING_ENABLED
                  uint instanceID : INSTANCEID_SEMANTIC;
-                #endif
+#endif
             };
             struct Varyings
             {
                  float4 positionCS : SV_POSITION;
-                 float3 normalWS;
                  float4 texCoord0;
-                 float3 viewDirectionWS;
-                #if !defined(LIGHTMAP_ON)
-                 float3 sh;
-                #endif
-                 float4 fogFactorAndVertexLight;
-                #if UNITY_ANY_INSTANCING_ENABLED
+#if UNITY_ANY_INSTANCING_ENABLED
                  uint instanceID : CUSTOM_INSTANCE_ID;
-                #endif
-                #if defined(SHADER_STAGE_FRAGMENT) && defined(VARYINGS_NEED_CULLFACE)
-                 FRONT_FACE_TYPE cullFace : FRONT_FACE_SEMANTIC;
-                #endif
-            };
-            struct SurfaceDescriptionInputs
-            {
-                 float4 uv0;
-            };
-            struct VertexDescriptionInputs
-            {
+#endif
             };
             struct PackedVaryings
             {
                  float4 positionCS : SV_POSITION;
-                 float3 interp0 : INTERP0;
-                 float4 interp1 : INTERP1;
-                 float3 interp2 : INTERP2;
-                 float2 interp3 : INTERP3;
-                 float2 interp4 : INTERP4;
-                 float3 interp5 : INTERP5;
-                 float4 interp6 : INTERP6;
-                #if UNITY_ANY_INSTANCING_ENABLED
+                 float4 interp0 : INTERP0;
+#if UNITY_ANY_INSTANCING_ENABLED
                  uint instanceID : CUSTOM_INSTANCE_ID;
-                #endif
-                #if defined(SHADER_STAGE_FRAGMENT) && defined(VARYINGS_NEED_CULLFACE)
-                 FRONT_FACE_TYPE cullFace : FRONT_FACE_SEMANTIC;
-                #endif
+#endif
             };
 
             PackedVaryings PackVaryings(Varyings input)
@@ -154,17 +90,10 @@ Shader "UTJ/FakeShadowByDecal"
                 PackedVaryings output;
                 ZERO_INITIALIZE(PackedVaryings, output);
                 output.positionCS = input.positionCS;
-                output.interp0.xyz = input.normalWS;
-                output.interp1.xyzw = input.texCoord0;
-                output.interp2.xyz = input.viewDirectionWS;
-                output.interp5.xyz = input.sh;
-                output.interp6.xyzw = input.fogFactorAndVertexLight;
-                #if UNITY_ANY_INSTANCING_ENABLED
+                output.interp0.xyzw = input.texCoord0;
+#if UNITY_ANY_INSTANCING_ENABLED
                 output.instanceID = input.instanceID;
-                #endif
-                #if defined(SHADER_STAGE_FRAGMENT) && defined(VARYINGS_NEED_CULLFACE)
-                output.cullFace = input.cullFace;
-                #endif
+#endif
                 return output;
             }
 
@@ -172,17 +101,10 @@ Shader "UTJ/FakeShadowByDecal"
             {
                 Varyings output;
                 output.positionCS = input.positionCS;
-                output.normalWS = input.interp0.xyz;
-                output.texCoord0 = input.interp1.xyzw;
-                output.viewDirectionWS = input.interp2.xyz;
-                output.sh = input.interp5.xyz;
-                output.fogFactorAndVertexLight = input.interp6.xyzw;
-                #if UNITY_ANY_INSTANCING_ENABLED
+                output.texCoord0 = input.interp0.xyzw;
+#if UNITY_ANY_INSTANCING_ENABLED
                 output.instanceID = input.instanceID;
-                #endif
-                #if defined(SHADER_STAGE_FRAGMENT) && defined(VARYINGS_NEED_CULLFACE)
-                output.cullFace = input.cullFace;
-                #endif
+#endif
                 return output;
             }
 
@@ -190,144 +112,135 @@ Shader "UTJ/FakeShadowByDecal"
             // --------------------------------------------------
             // Graph
 
-            // Graph Properties
             CBUFFER_START(UnityPerMaterial)
             float4 _DecalTexture_TexelSize;
             float4 _Base_Color;
-            //float _DrawOrder;
-            //float _DecalMeshBiasType;
-            //float _DecalMeshDepthBias;
-            //float _DecalMeshViewBias;
             CBUFFER_END
-            float _DecalMeshDepthBias; // 使ってないが定義で必要...Constant Bufferにいらないので出す
 
-            // Object and Global properties
-            SAMPLER(SamplerState_Linear_Repeat);
+            //SAMPLER(SamplerState_Linear_Repeat);
             TEXTURE2D(_DecalTexture);
             SAMPLER(sampler_DecalTexture);
 
-            // Graph Functions
-
-            void Unity_Multiply_float4_float4(float4 A, float4 B, out float4 Out)
-            {
-                Out = A * B;
-            }
-
-            // Graph Vertex
-            struct VertexDescription
-            {
-            };
-
-            VertexDescription VertexDescriptionFunction(VertexDescriptionInputs IN)
-            {
-                VertexDescription description = (VertexDescription)0;
-                return description;
-            }
-
-            // Graph Pixel
-            struct SurfaceDescription
-            {
-                float3 BaseColor;
-                float Alpha;
-            };
-
-            SurfaceDescription SurfaceDescriptionFunction(SurfaceDescriptionInputs IN)
-            {
-                SurfaceDescription surface = (SurfaceDescription)0;
-                UnityTexture2D _Property_9f1059a7a93a46ccab349515214f3ed2_Out_0 = UnityBuildTexture2DStructNoScale(_DecalTexture);
-                float4 _SampleTexture2D_7388a7ddbf6648ec92c3bb54ed055048_RGBA_0 = SAMPLE_TEXTURE2D(_Property_9f1059a7a93a46ccab349515214f3ed2_Out_0.tex, _Property_9f1059a7a93a46ccab349515214f3ed2_Out_0.samplerstate, _Property_9f1059a7a93a46ccab349515214f3ed2_Out_0.GetTransformedUV(IN.uv0.xy));
-                float _SampleTexture2D_7388a7ddbf6648ec92c3bb54ed055048_R_4 = _SampleTexture2D_7388a7ddbf6648ec92c3bb54ed055048_RGBA_0.r;
-                float _SampleTexture2D_7388a7ddbf6648ec92c3bb54ed055048_G_5 = _SampleTexture2D_7388a7ddbf6648ec92c3bb54ed055048_RGBA_0.g;
-                float _SampleTexture2D_7388a7ddbf6648ec92c3bb54ed055048_B_6 = _SampleTexture2D_7388a7ddbf6648ec92c3bb54ed055048_RGBA_0.b;
-                float _SampleTexture2D_7388a7ddbf6648ec92c3bb54ed055048_A_7 = _SampleTexture2D_7388a7ddbf6648ec92c3bb54ed055048_RGBA_0.a;
-                float4 _Property_b5ca5e985fac473f8a1fac133002e353_Out_0 = _Base_Color;
-                float4 _Multiply_dbcba1ca2def4675be44c68d0bdb7a63_Out_2;
-                Unity_Multiply_float4_float4(_SampleTexture2D_7388a7ddbf6648ec92c3bb54ed055048_RGBA_0, _Property_b5ca5e985fac473f8a1fac133002e353_Out_0, _Multiply_dbcba1ca2def4675be44c68d0bdb7a63_Out_2);
-                surface.BaseColor = (_Multiply_dbcba1ca2def4675be44c68d0bdb7a63_Out_2.xyz);
-                surface.Alpha = _SampleTexture2D_7388a7ddbf6648ec92c3bb54ed055048_A_7;
-                return surface;
-            }
-
             // --------------------------------------------------
-            // Build Graph Inputs
+            // Functions
 
-
-            //     $features.graphVertex:  $include("VertexAnimation.template.hlsl")
-            //                                       ^ ERROR: $include cannot find file : VertexAnimation.template.hlsl. Looked into:
-            // Packages/com.unity.shadergraph/Editor/Generation/Templates
-
-
-            //     $features.graphPixel:   $include("SharedCode.template.hlsl")
-            //                                       ^ ERROR: $include cannot find file : SharedCode.template.hlsl. Looked into:
-            // Packages/com.unity.shadergraph/Editor/Generation/Templates
-
-            SurfaceDescriptionInputs BuildSurfaceDescriptionInputs(Varyings input)
-            {
-                SurfaceDescriptionInputs output;
-                ZERO_INITIALIZE(SurfaceDescriptionInputs, output);
-
-                /* WARNING: $splice Could not find named fragment 'CustomInterpolatorCopyToSDI' */
-
-                output.uv0 = input.texCoord0;
-                #if defined(SHADER_STAGE_FRAGMENT) && defined(VARYINGS_NEED_CULLFACE)
-                #define BUILD_SURFACE_DESCRIPTION_INPUTS_OUTPUT_FACESIGN                output.FaceSign =                                   IS_FRONT_VFACE(input.cullFace, true, false);
-                #else
-                #define BUILD_SURFACE_DESCRIPTION_INPUTS_OUTPUT_FACESIGN
-                #endif
-                #undef BUILD_SURFACE_DESCRIPTION_INPUTS_OUTPUT_FACESIGN
-
-                return output;
-            }
-
-            // --------------------------------------------------
-            // Build Surface Data
-
-            void GetSurfaceData(Varyings input, uint2 positionSS, float angleFadeFactor, out DecalSurfaceData surfaceData)
+            half4 GetSurfaceColor(Varyings input, uint2 positionSS, float angleFadeFactor)
             {
                 half4x4 normalToWorld = UNITY_ACCESS_INSTANCED_PROP(Decal, _NormalToWorld);
                 half fadeFactor = clamp(normalToWorld[0][3], 0.0f, 1.0f) * angleFadeFactor;
                 float2 scale = float2(normalToWorld[3][0], normalToWorld[3][1]);
                 float2 offset = float2(normalToWorld[3][2], normalToWorld[3][3]);
                 input.texCoord0.xy = input.texCoord0.xy * scale + offset;
-                half3 normalWS = TransformObjectToWorldDir(half3(0, 1, 0));
-                half3 tangentWS = TransformObjectToWorldDir(half3(1, 0, 0));
-                half3 bitangentWS = TransformObjectToWorldDir(half3(0, 0, 1));
-                half sign = dot(cross(normalWS, tangentWS), bitangentWS) > 0 ? 1 : -1;
-                input.normalWS.xyz = normalWS;
 
-                SurfaceDescriptionInputs surfaceDescriptionInputs = BuildSurfaceDescriptionInputs(input);
-                SurfaceDescription surfaceDescription = SurfaceDescriptionFunction(surfaceDescriptionInputs);
+                UnityTexture2D _Property_Out_0 = UnityBuildTexture2DStructNoScale(_DecalTexture);
+                float4 _SampleTexture2D_RGBA_0 = SAMPLE_TEXTURE2D(_Property_Out_0.tex, _Property_Out_0.samplerstate, _Property_Out_0.GetTransformedUV(input.texCoord0.xy));
+                float3 surfaceColor = _SampleTexture2D_RGBA_0.rgb * _Base_Color.rgb;
+                float surfaceAlpha = _SampleTexture2D_RGBA_0.a;
 
-                // setup defaults -- these are used if the graph doesn't output a value
-                ZERO_INITIALIZE(DecalSurfaceData, surfaceData);
-                surfaceData.occlusion = half(1.0);
-                surfaceData.smoothness = half(0);
-
-                #ifdef _MATERIAL_AFFECTS_NORMAL
-                    surfaceData.normalWS.w = half(1.0);
-                #else
-                    surfaceData.normalWS.w = half(0.0);
-                #endif
-
-                // copy across graph values, if defined
-                surfaceData.baseColor.xyz = half3(surfaceDescription.BaseColor);
-                surfaceData.baseColor.w = half(surfaceDescription.Alpha * fadeFactor);
-
-                #if defined(_MATERIAL_AFFECTS_NORMAL)
-                #else
-                    surfaceData.normalWS.xyz = normalToWorld[2].xyz;
-                #endif
-
-
-                // In case of Smoothness / AO / Metal, all the three are always computed but color mask can change
+                return half4(surfaceColor.r, surfaceColor.g, surfaceColor.b, surfaceAlpha * fadeFactor);
             }
 
             // --------------------------------------------------
             // Main
 
-            #include "Packages/com.unity.render-pipelines.universal/Editor/ShaderGraph/Includes/Varyings.hlsl"
-            #include "Packages/com.unity.render-pipelines.universal/Editor/ShaderGraph/Includes/ShaderPassDecal.hlsl"
+            Varyings BuildVaryings(Attributes input)
+            {
+                Varyings output = (Varyings)0;
 
+                UNITY_SETUP_INSTANCE_ID(input);
+
+                UNITY_TRANSFER_INSTANCE_ID(input, output);
+                UNITY_INITIALIZE_VERTEX_OUTPUT_STEREO(output);
+
+                // TODO: Avoid path via VertexPositionInputs (Universal)
+                VertexPositionInputs vertexInput = GetVertexPositionInputs(input.positionOS.xyz);
+
+                // Returns the camera relative position (if enabled)
+                float3 positionWS = TransformObjectToWorld(input.positionOS);
+
+                output.positionCS = TransformWorldToHClip(positionWS);
+
+                output.texCoord0 = input.uv0;
+
+#ifdef EDITOR_VISUALIZATION
+                float2 VizUV = 0;
+                float4 LightCoord = 0;
+                UnityEditorVizData(input.positionOS, input.uv0, input.uv1, input.uv2, VizUV, LightCoord);
+#endif
+
+                return output;
+            }
+
+            PackedVaryings Vert(Attributes inputMesh)
+            {
+                Varyings output = (Varyings)0;
+                output = BuildVaryings(inputMesh);
+
+                PackedVaryings packedOutput = (PackedVaryings)0;
+                packedOutput = PackVaryings(output);
+
+                return packedOutput;
+            }
+
+            void Frag(PackedVaryings packedInput, out half4 outColor : SV_Target0)
+            {
+                UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(packedInput);
+                UNITY_SETUP_INSTANCE_ID(packedInput);
+                Varyings input = UnpackVaryings(packedInput);
+
+                half angleFadeFactor = 1.0;
+
+                float2 positionCS = input.positionCS.xy;
+
+                // Only screen space needs flip logic, other passes do not setup needed properties so we skip here
+                TransformScreenUV(positionCS, _ScreenSize.y);
+
+#if UNITY_REVERSED_Z
+                float depth = LoadSceneDepth(positionCS.xy);
+#else
+                // Adjust z to match NDC for OpenGL
+                float depth = lerp(UNITY_NEAR_CLIP_VALUE, 1, LoadSceneDepth(positionCS.xy));
+#endif
+
+                float2 positionSS = input.positionCS.xy * _ScreenSize.zw;
+
+                float3 positionWS = ComputeWorldSpacePosition(positionSS, depth, UNITY_MATRIX_I_VP);
+
+                // Transform from relative world space to decal space (DS) to clip the decal
+                float3 positionDS = TransformWorldToObject(positionWS);
+                positionDS = positionDS * float3(1.0, -1.0, 1.0);
+
+                // call clip as early as possible
+                float clipValue = 0.5 - Max3(abs(positionDS).x, abs(positionDS).y, abs(positionDS).z);
+                clip(clipValue);
+
+                float2 texCoord = positionDS.xz + float2(0.5, 0.5);
+                input.texCoord0.xy = texCoord;
+
+#ifdef DECAL_ANGLE_FADE
+    #if defined(_DECAL_NORMAL_BLEND_HIGH)
+                half3 normalWS = half3(ReconstructNormalTap9(positionCS.xy));
+    #elif defined(_DECAL_NORMAL_BLEND_MEDIUM)
+                half3 normalWS = half3(ReconstructNormalTap5(positionCS.xy));
+    #else
+                half3 normalWS = half3(ReconstructNormalDerivative(input.positionCS.xy));
+    #endif
+
+                // Check if this decal projector require angle fading
+                half4x4 normalToWorld = UNITY_ACCESS_INSTANCED_PROP(Decal, _NormalToWorld);
+                half2 angleFade = half2(normalToWorld[1][3], normalToWorld[2][3]);
+
+                if (angleFade.y < 0.0f) // if angle fade is enabled
+                {
+                    half3 decalNormal = half3(normalToWorld[0].z, normalToWorld[1].z, normalToWorld[2].z);
+                    half dotAngle = dot(normalWS, decalNormal);
+                    // See equation in DecalCreateDrawCallSystem.cs - simplified to a madd mul add here
+                    angleFadeFactor = saturate(angleFade.x + angleFade.y * (dotAngle * (dotAngle - 2.0)));
+                }
+#endif
+
+                outColor = GetSurfaceColor(input, (uint2)positionSS, angleFadeFactor);
+            }
             ENDHLSL
         }
     }
