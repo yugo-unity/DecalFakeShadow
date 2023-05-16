@@ -82,6 +82,8 @@ namespace UTJ {
                 Object.DestroyImmediate(this.matParams[i].material);
                 this.matParams[i].material = null;
             }
+            foreach (var shadow in this.available.Keys)
+                shadow.Sleep(returnShadow:false);
             this.available.Clear();
             this.indexStack.Clear();
             requests.Clear();

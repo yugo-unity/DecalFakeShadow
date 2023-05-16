@@ -25,6 +25,7 @@ namespace UTJ {
 
         private new Renderer renderer = null;
         private Transform root = null;
+        private Material[] materials = null;
         private bool isSkinned = false;
         private STATE state = 0;
 
@@ -51,8 +52,10 @@ namespace UTJ {
         public void Wakeup() {
             Debug.Assert(this.projector != null, "Set the reference of DecalProjector");
 
-            if (this.renderer == null)
+            if (this.renderer == null) {
                 this.renderer = this.GetComponent<Renderer>();
+                this.materials = null; // for Enter Play Mode Options
+            }
             if (this.root == null)
                 this.root = this.projector.transform;
 
@@ -70,9 +73,10 @@ namespace UTJ {
         /// <summary>
         /// 停止
         /// </summary>
-        public void Sleep() {
-            if (this.state.HasFlag(STATE.AVAIRABLE))
+        public void Sleep(bool returnShadow=true) {
+            if (returnShadow && this.state.HasFlag(STATE.AVAIRABLE))
                 FakeShadowManager.Return(this);
+
             this.state = 0; // cleared REQUEST/AVAIRABLE
             this.projector.enabled = false;
 
@@ -99,7 +103,7 @@ namespace UTJ {
             //var view = this.root.worldToLocalMatrix;
             var view = Matrix4x4.TRS(this.root.position, this.root.rotation, Vector3.one).inverse;
 
-            foreach (var mat in this.renderer.materials) {
+            foreach (var mat in this.materials) {
                 mat.SetKeyword(this.clipKeyword, this.glidClipping);
                 mat.SetMatrix(FakeShadowManager.PROP_ID_PROJ, this.projection);
                 mat.SetMatrix(FakeShadowManager.PROP_ID_VIEW, view);
@@ -119,22 +123,23 @@ namespace UTJ {
             var view = this.root.worldToLocalMatrix;
 
             if (this.shadowMesh) {
-                var materials = this.renderer.materials;
-                for (var i = 0; i < materials.Length; ++i)
-                    materials[i] = param.material;
-                this.renderer.materials = materials;
+                if (this.materials == null)
+                    this.materials = this.renderer.sharedMaterials;
+                for (var i = 0; i < this.materials.Length; ++i)
+                    this.materials[i] = param.material;
+                this.renderer.materials = this.materials;
 
                 // ShadowMeshの有無でShaderが変わるので都度生成
-                this.clipKeyword = new UnityEngine.Rendering.LocalKeyword(materials[0].shader, FakeShadowManager.CLIP_RECT_KEYWORD);
+                this.clipKeyword = new UnityEngine.Rendering.LocalKeyword(param.material.shader, FakeShadowManager.CLIP_RECT_KEYWORD);
                 param.material.SetKeyword(this.clipKeyword, this.glidClipping);
                 param.material.SetMatrix(FakeShadowManager.PROP_ID_PROJ, this.projection);
                 param.material.SetMatrix(FakeShadowManager.PROP_ID_VIEW, view);
             } else {
-                var materials = this.renderer.materials;
-
+                if (this.materials == null)
+                    this.materials = this.renderer.materials;
                 // ShadowMeshの有無でShaderが変わるので都度生成
-                this.clipKeyword = new UnityEngine.Rendering.LocalKeyword(materials[0].shader, FakeShadowManager.CLIP_RECT_KEYWORD);
-                foreach (var mat in materials) {
+                this.clipKeyword = new UnityEngine.Rendering.LocalKeyword(this.materials[0].shader, FakeShadowManager.CLIP_RECT_KEYWORD);
+                foreach (var mat in this.materials) {
                     mat.SetKeyword(this.clipKeyword, this.glidClipping);
                     mat.SetMatrix(FakeShadowManager.PROP_ID_PROJ, this.projection);
                     mat.SetMatrix(FakeShadowManager.PROP_ID_VIEW, view);
