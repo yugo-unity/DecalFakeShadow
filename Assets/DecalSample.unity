@@ -272,10 +272,11 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: c7dfa10038e309745ad70114dc8646f5, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  shadowMesh: 0
-  activeOnEnable: 1
-  glidClipping: 1
   projector: {fileID: 1249848018}
+  activeOnEnable: 1
+  isStatic: 0
+  shadowMesh: 0
+  _glidClipping: 1
 --- !u!4 &149619934 stripped
 Transform:
   m_CorrespondingSourceObject: {fileID: 9117044059260014222, guid: c1c632b1b9185bc43aafd480e0799531, type: 3}
@@ -1529,10 +1530,11 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: c7dfa10038e309745ad70114dc8646f5, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  shadowMesh: 0
-  activeOnEnable: 1
-  glidClipping: 0
   projector: {fileID: 1110683514}
+  activeOnEnable: 1
+  isStatic: 0
+  shadowMesh: 0
+  _glidClipping: 0
 --- !u!1 &1249848016
 GameObject:
   m_ObjectHideFlags: 0
@@ -1673,10 +1675,11 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: c7dfa10038e309745ad70114dc8646f5, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  shadowMesh: 1
-  activeOnEnable: 1
-  glidClipping: 0
   projector: {fileID: 1884424828}
+  activeOnEnable: 1
+  isStatic: 1
+  shadowMesh: 1
+  _glidClipping: 0
 --- !u!137 &1504856034
 SkinnedMeshRenderer:
   m_ObjectHideFlags: 0
