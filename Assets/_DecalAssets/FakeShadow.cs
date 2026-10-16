@@ -6,6 +6,7 @@ namespace UTJ {
     [RequireComponent(typeof(Renderer))]
     /// <summary>
     /// DecalProjectorを利用したトップビューの疑似影
+    /// RendererのUser Valueに割当インデックスを書き込み、FakeShadowPassFeatureが共通Materialで描画する
     /// </summary>
     public class FakeShadow : MonoBehaviour {
         [Tooltip("対応するDecal Projector参照")]
@@ -28,15 +29,14 @@ namespace UTJ {
 
         private new Renderer renderer = null;
         private Transform root = null;
-        private Material[] materials = null;
         private STATE state = 0;
 
-        private int updateMaterialCount = 0;
-        //private bool prevClipping = false;
         private Vector3 prevSize = Vector3.zero;
         private Vector3 prevPivot = Vector3.zero;
         private Matrix4x4 projection = Matrix4x4.identity;
-        private UnityEngine.Rendering.LocalKeyword[] clipKeywords;
+        private Matrix4x4 view = Matrix4x4.identity;
+        private int shadowIndex = -1;
+        private int userValueShift = -1; // 書き込み済みのUser Valueのbit位置
 
         internal bool isShadowMesh { get => this.shadowMesh; }
         internal bool isRequested { get => this.state.HasFlag(STATE.REQUEST); }
@@ -46,8 +46,8 @@ namespace UTJ {
                 if (this._glidClipping == value)
                     return;
                 this._glidClipping = value;
-                for (var i = 0; i < this.updateMaterialCount; ++i)
-                    this.materials[i].SetKeyword(this.clipKeywords[i], this._glidClipping);
+                if (this.shadowIndex >= 0)
+                    FakeShadowManager.SetShadowClip(this.shadowIndex, this._glidClipping);
             }
         }
 
@@ -65,18 +65,8 @@ namespace UTJ {
         public void Wakeup() {
             Debug.Assert(this.projector != null, "Set the reference of DecalProjector");
 
-            if (this.renderer == null) {
+            if (this.renderer == null)
                 this.renderer = this.GetComponent<Renderer>();
-
-                if (this.shadowMesh) {
-                    this.materials = this.renderer.sharedMaterials;
-                    this.updateMaterialCount = 1;
-                } else {
-                    this.materials = this.renderer.materials;
-                    this.updateMaterialCount = this.materials.Length;
-                }
-                this.clipKeywords = new UnityEngine.Rendering.LocalKeyword[this.materials.Length];
-            }
             if (this.root == null)
                 this.root = this.projector.transform;
 
@@ -99,6 +89,15 @@ namespace UTJ {
 
             this.state = 0; // cleared REQUEST/AVAIRABLE
             this.projector.enabled = false;
+            this.ClearUserValue();
+        }
+
+        /// <summary>
+        /// FakeShadowManager破棄時の一時停止（リクエスト状態に戻して再設定を待つ）
+        /// </summary>
+        internal void Suspend() {
+            this.state &= ~STATE.AVAIRABLE;
+            this.ClearUserValue();
         }
 
         /// <summary>
@@ -108,24 +107,21 @@ namespace UTJ {
             if (!this.state.HasFlag(STATE.AVAIRABLE))
                 return;
 
-            if (this.UpdateProjection()) {
-                for (var i = 0; i < this.updateMaterialCount; ++i)
-                    this.materials[i].SetMatrix(FakeShadowManager.PROP_ID_PROJ, this.projection);
-            }
+            var updated = this.UpdateProjection();
 
             // 静的なProjectorはView行列の更新不要
-            if (this.isStatic)
-                return;
+            if (!this.isStatic) {
+                // Scaleはモデル行列に反映されるのでView行列でつぶさない
+                //var view = this.root.worldToLocalMatrix;
 
-            // Scaleはモデル行列に反映されるのでView行列でつぶさない
-            //var view = this.root.worldToLocalMatrix;
+                // x3ぐらい速くなる（ShadowTextureの都合上、数十程度しかこないので雀の涙）
+                //var view = Matrix4x4.TRS(this.root.position, this.root.rotation, Vector3.one).inverse;
+                TR_Inverse(this.root, out this.view);
+                updated = true;
+            }
 
-            // x3ぐらい速くなる（ShadowTextureの都合上、数十程度しかこないので雀の涙）
-            //var view = Matrix4x4.TRS(this.root.position, this.root.rotation, Vector3.one).inverse;
-            TR_Inverse(this.root, out var view);
-
-            for (var i = 0; i < this.updateMaterialCount; ++i)
-                this.materials[i].SetMatrix(FakeShadowManager.PROP_ID_VIEW, view);
+            if (updated)
+                FakeShadowManager.SetShadowMatrix(this.shadowIndex, this.projection * this.view);
         }
 
         /// <summary>
@@ -138,35 +134,73 @@ namespace UTJ {
                 return;
 
             this.UpdateProjection(force : true);
-            TR_Inverse(this.root, out var view);
+            TR_Inverse(this.root, out this.view);
 
+            // Shadow MeshはFake Shadow描画専用なので共通Materialを割り当てる（通常描画のPassを持たない）
             if (this.shadowMesh) {
-                for (var i = 0; i < this.materials.Length; ++i)
-                    this.materials[i] = param.material;
-                this.renderer.materials = this.materials;
-
-                // NOTE: FakeShadowManagerでキャッシュしてもいい
-                this.clipKeywords[0] = new UnityEngine.Rendering.LocalKeyword(param.material.shader, FakeShadowManager.CLIP_RECT_KEYWORD);
-
-                param.material.SetKeyword(this.clipKeywords[0], this.glidClipping);
-                param.material.SetMatrix(FakeShadowManager.PROP_ID_PROJ, this.projection);
-                param.material.SetMatrix(FakeShadowManager.PROP_ID_VIEW, view);
-            } else {
-                for (var i = 0; i < this.materials.Length; ++i) {
-                    this.clipKeywords[i] = new UnityEngine.Rendering.LocalKeyword(this.materials[i].shader, FakeShadowManager.CLIP_RECT_KEYWORD);
-
-                    this.materials[i].SetKeyword(this.clipKeywords[i], this.glidClipping);
-                    this.materials[i].SetMatrix(FakeShadowManager.PROP_ID_PROJ, this.projection);
-                    this.materials[i].SetMatrix(FakeShadowManager.PROP_ID_VIEW, view);
-                    // 1度設定すればいいのでFakeShadowManagerからMaterialを借りる時は不要
-                    this.materials[i].SetVector(FakeShadowManager.PROP_ID_OFFSET, param.offset);
-                    this.materials[i].SetVector(FakeShadowManager.PROP_ID_CLIP, param.clipRect);
-                }
+                var materials = this.renderer.sharedMaterials;
+                for (var i = 0; i < materials.Length; ++i)
+                    materials[i] = param.material;
+                this.renderer.sharedMaterials = materials;
             }
+
+            this.shadowIndex = param.index;
+            this.ApplyUserValue(param.userValueShift);
+            FakeShadowManager.SetShadowMatrix(this.shadowIndex, this.projection * this.view);
+            FakeShadowManager.SetShadowClip(this.shadowIndex, this.glidClipping);
+
             this.projector.uvScale = param.uvScale;
             this.projector.uvBias = param.uvBias;
 
             this.state |= STATE.AVAIRABLE;
+        }
+
+        /// <summary>
+        /// User Valueのbit位置の変更
+        /// </summary>
+        internal void ChangeUserValueShift(int shift) {
+            if (this.shadowIndex >= 0)
+                this.ApplyUserValue(shift);
+        }
+
+        /// <summary>
+        /// 割当インデックス+1をUser Valueの指定位置の8bitに書き込む（他のbitは保持する）
+        /// </summary>
+        private void ApplyUserValue(int shift) {
+            var value = this.GetUserValue();
+            if (this.userValueShift >= 0)
+                value &= ~(0xFFu << this.userValueShift);
+            value &= ~(0xFFu << shift);
+            value |= (uint)(this.shadowIndex + 1) << shift;
+            this.SetUserValue(value);
+            this.userValueShift = shift;
+        }
+
+        /// <summary>
+        /// User Valueから割当インデックスを消去する
+        /// </summary>
+        private void ClearUserValue() {
+            if (this.userValueShift >= 0 && this.renderer != null)
+                this.SetUserValue(this.GetUserValue() & ~(0xFFu << this.userValueShift));
+            this.userValueShift = -1;
+            this.shadowIndex = -1;
+        }
+
+        private uint GetUserValue() {
+            if (this.renderer is SkinnedMeshRenderer smr)
+                return smr.GetShaderUserValue();
+            if (this.renderer is MeshRenderer mr)
+                return mr.GetShaderUserValue();
+            return 0u;
+        }
+
+        private void SetUserValue(uint value) {
+            if (this.renderer is SkinnedMeshRenderer smr)
+                smr.SetShaderUserValue(value);
+            else if (this.renderer is MeshRenderer mr)
+                mr.SetShaderUserValue(value);
+            else
+                Debug.LogError($"FakeShadow supports only MeshRenderer and SkinnedMeshRenderer : {this.name}");
         }
 
         /// <summary>

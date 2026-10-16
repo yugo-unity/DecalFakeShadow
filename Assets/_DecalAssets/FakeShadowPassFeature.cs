@@ -18,20 +18,19 @@ namespace UTJ {
         public struct MatParam {
             public int index;
             public Vector2 uvScale;
-            public Vector4 offset;
             public Vector2 uvBias;
-            public Vector4 clipRect;
-            public Material material;
+            public Material material;   // Shadow Mesh用の共通Material
+            public int userValueShift;
         }
 
-        public const int SHADOW_LIMIT = 25; // 1024の16分割で256を限界値として想定
-        public const string CLIP_RECT_KEYWORD = "FAKE_CLIP";
+        public const int SHADOW_LIMIT = 25; // 1024の16分割で256を限界値として想定、FakeShadowCaster.shaderのFAKE_SHADOW_LIMITと合わせる
+        public const int USER_VALUE_SHIFT_MAX = 24; // User Valueの32bit中、8bitを使用する
         public static readonly int PROP_ID_LINE = Shader.PropertyToID("_FakeShadowLine");
-        public static readonly int PROP_ID_OFFSET = Shader.PropertyToID("_FakeShadowOffset");
         public static readonly int PROP_ID_COLOR = Shader.PropertyToID("_FakeShadowColor");
-        public static readonly int PROP_ID_VIEW = Shader.PropertyToID("_FakeShadowView");
-        public static readonly int PROP_ID_PROJ = Shader.PropertyToID("_FakeShadowProj");
-        public static readonly int PROP_ID_CLIP = Shader.PropertyToID("_FakeClipRect");
+        public static readonly int PROP_ID_USER_VALUE_SHIFT = Shader.PropertyToID("_FakeShadowUserValueShift");
+        public static readonly int PROP_ID_MATRICES = Shader.PropertyToID("_FakeShadowMatrices");
+        public static readonly int PROP_ID_OFFSETS = Shader.PropertyToID("_FakeShadowOffsets");
+        public static readonly int PROP_ID_CLIP_RECTS = Shader.PropertyToID("_FakeShadowClipRects");
         public static readonly Quaternion TOP_ROT = Quaternion.Euler(90f, 0f, 0f);
         #endregion
 
@@ -39,13 +38,19 @@ namespace UTJ {
         #region MEMBER
         private static Stack<FakeShadow> requests = new Stack<FakeShadow>(SHADOW_LIMIT);
         private static FakeShadowManager instance = null;
+        // Character毎のデータ（インデックスはRenderer User Valueの値 - 1）
+        private static Matrix4x4[] s_Matrices = new Matrix4x4[SHADOW_LIMIT]; // Projection * View
+        private static Vector4[] s_Offsets = new Vector4[SHADOW_LIMIT];      // xy: グリッド位置, z: Clip有効
+        private static Vector4[] s_ClipRects = new Vector4[SHADOW_LIMIT];
         private Dictionary<FakeShadow, int> available = new Dictionary<FakeShadow, int>(SHADOW_LIMIT);
         private Stack<FakeShadow> cancels = new Stack<FakeShadow>(SHADOW_LIMIT);
         private Stack<int> indexStack = new Stack<int>(SHADOW_LIMIT);
         private MatParam[] matParams = new MatParam[SHADOW_LIMIT];
+        private Material _material = null;
         private Color _color = Color.black;
         private int availableCount = 0;
         private float mapSize = 1f;
+        private int userValueShift = 0;
         #endregion
 
 
@@ -59,7 +64,7 @@ namespace UTJ {
         /// <summary>
         /// 初期化
         /// </summary>
-        /// <param name="fakeShader">ShadowMesh用のShader</param>
+        /// <param name="fakeShader">Fake Shadow描画用のShader (overrideMaterialとShadow Meshで共通)</param>
         internal FakeShadowManager(Shader fakeShader) {
             if (instance != null) {
                 Debug.LogError("FakeShadowManager is duplicated.");
@@ -68,28 +73,38 @@ namespace UTJ {
             instance = this;
 
             if (fakeShader != null) {
-                for (var i = 0; i < SHADOW_LIMIT; ++i)
-                    this.matParams[i].material = new Material(fakeShader);
+                this._material = new Material(fakeShader);
+                this._material.hideFlags = HideFlags.HideAndDontSave;
             }
 
             Shader.SetGlobalColor(PROP_ID_COLOR, Color.gray);
+            Shader.SetGlobalInteger(PROP_ID_USER_VALUE_SHIFT, this.userValueShift);
             this.availableCount = 0;
             this.mapSize = 1;
         }
 
         /// <summary>
+        /// 共通Material
+        /// </summary>
+        internal Material material { get => this._material; }
+
+        /// <summary>
         /// 破棄
         /// </summary>
         internal void Dispose() {
-            for (var i = 0; i < SHADOW_LIMIT; ++i) {
-                Object.DestroyImmediate(this.matParams[i].material);
-                this.matParams[i].material = null;
+            // Editor上でRenderer設定を変更するとRendererが再生成されFeatureのDispose/Createが走る
+            // 稼働中のShadowは停止せずリクエストに戻し、再生成後のManagerで再設定させる
+            foreach (var shadow in this.available.Keys) {
+                if (shadow == null)
+                    continue;
+                shadow.Suspend();
+                if (!requests.Contains(shadow))
+                    requests.Push(shadow);
             }
-            foreach (var shadow in this.available.Keys)
-                shadow.Sleep(returnShadow:false);
             this.available.Clear();
             this.indexStack.Clear();
-            requests.Clear();
+            Object.DestroyImmediate(this._material);
+            this._material = null;
             instance = null;
         }
 
@@ -114,23 +129,16 @@ namespace UTJ {
             this.indexStack.Clear();
             for (var i = 0; i < this.availableCount; ++i) {
                 // 描画位置、グリッドの中点
-                var pos = Vector4.zero;
-                pos.x = -1f + block * ((float)i % line + 0.5f);
-                pos.y = 1f - block * (Mathf.Floor((float)i / line) + 0.5f);
+                s_Offsets[i].x = -1f + block * ((float)i % line + 0.5f);
+                s_Offsets[i].y = 1f - block * (Mathf.Floor((float)i / line) + 0.5f);
                 var uvBias = new Vector2(uvScale * Mathf.Floor((float)i % line), uvScale * Mathf.Floor((float)i / line));
                 // Bilinerによってはみ出してくるので1pix内側で切る
-                var clipRect = new Vector4(uvBias.x + onePixel, uvBias.y + onePixel, uvScale - onePixelx2, uvScale - onePixelx2);
+                s_ClipRects[i] = new Vector4(uvBias.x + onePixel, uvBias.y + onePixel, uvScale - onePixelx2, uvScale - onePixelx2);
 
                 this.indexStack.Push(i);
-                if (this.matParams[i].material != null) {
-                    this.matParams[i].material.SetVector(PROP_ID_OFFSET, pos);
-                    this.matParams[i].material.SetVector(PROP_ID_CLIP, clipRect);
-                }
                 this.matParams[i].index = i;
                 this.matParams[i].uvScale = new Vector2(uvScale, uvScale);
-                this.matParams[i].offset = pos;
                 this.matParams[i].uvBias = uvBias;
-                this.matParams[i].clipRect = clipRect;
             }
 
             // 現在有効なShadowの更新
@@ -153,6 +161,21 @@ namespace UTJ {
         }
 
         /// <summary>
+        /// User Valueのbit位置の設定
+        /// </summary>
+        /// <param name="shift">User Valueの何bit目から8bitを使うか</param>
+        internal void SetUserValueShift(int shift) {
+            shift = Mathf.Clamp(shift, 0, USER_VALUE_SHIFT_MAX);
+            if (this.userValueShift == shift)
+                return;
+
+            this.userValueShift = shift;
+            foreach (var shadow in this.available.Keys)
+                shadow.ChangeUserValueShift(shift);
+            Shader.SetGlobalInteger(PROP_ID_USER_VALUE_SHIFT, shift);
+        }
+
+        /// <summary>
         /// 新規リクエストの対応
         /// </summary>
         internal void ResolveRequests() {
@@ -170,20 +193,37 @@ namespace UTJ {
                     req.Sleep();
                     continue;
                 }
+                // SkinnedMeshはMeshRendererを分けずにSubMeshの方がオーバーヘッドが低いのでMulti Renderer対応はしない
+                if (req.isShadowMesh && this._material == null) {
+                    Debug.LogError("Not supported FakeShadow by ShadowMesh. Need the Shader.");
+                    req.Sleep();
+                    continue;
+                }
 
                 var index = this.indexStack.Pop();
                 this.available.Add(req, index);
 
-                // SkinnedMeshはMeshRendererを分けずにSubMeshの方がオーバーヘッドが低いのでMulti Renderer対応はしない
-                if (req.isShadowMesh) {
-                    if (this.matParams[index].material == null) {
-                        Return(req);
-                        Debug.LogError("Not supported FakeShadow by ShadowMesh. Need the Shader.");
-                        continue;
-                    }
-                }
+                this.matParams[index].material = this._material;
+                this.matParams[index].userValueShift = this.userValueShift;
                 req.Setup(in this.matParams[index]);
             }
+        }
+
+        /// <summary>
+        /// Character毎のデータをグローバル配列で設定
+        /// </summary>
+        internal static void SetGlobalShadowData() {
+            Shader.SetGlobalMatrixArray(PROP_ID_MATRICES, s_Matrices);
+            Shader.SetGlobalVectorArray(PROP_ID_OFFSETS, s_Offsets);
+            Shader.SetGlobalVectorArray(PROP_ID_CLIP_RECTS, s_ClipRects);
+        }
+
+        internal static void SetShadowMatrix(int index, in Matrix4x4 viewProj) {
+            s_Matrices[index] = viewProj;
+        }
+
+        internal static void SetShadowClip(int index, bool clip) {
+            s_Offsets[index].z = clip ? 1f : 0f;
         }
         #endregion
 
@@ -234,9 +274,29 @@ namespace UTJ {
     }
     #endregion
 
+    /// <summary>
+    /// CharacterをDecal Shadowから除外する方法はDecalRendererFeatureの"Use Rendering Layers"で切り替わる
+    ///   - 有効: CharacterはRenderer標準のPrepass/Opaque Passで描画する（Opaque/Prepass Layer MaskにCharacterを含めること）
+    ///           Characterの Rendering Layer Mask を Decal Projector の Rendering Layer Mask から外す
+    ///   - 無効: CharacterをDecalより後に描画して上書きする（Opaque Layer MaskからCharacterを外すこと）
+    /// Decal RendererFeatureのTechnique(Screen Space / DBuffer)は手動で切り替える（ランタイムでの切替は非対応、Editor上での切替は可）
+    /// </summary>
     public class FakeShadowPassFeature : ScriptableRendererFeature {
+        /// <summary>
+        /// DecalRendererFeatureで解決されたTechnique (URP内部のDecalTechniqueと同値)
+        /// </summary>
+        private enum DecalTechnique {
+            Invalid,
+            DBuffer,
+            ScreenSpace,
+            GBuffer,     // 非対応
+        }
+
         public LayerMask characterLayer = 0;
+        [Tooltip("Fake Shadowの描画に使うShader (UTJ/FakeShadowCaster)。Characterのマテリアルを差し替えて描画する")]
         public Shader fakeShadowShader = null;
+        [Range(0, FakeShadowManager.USER_VALUE_SHIFT_MAX), Tooltip("RendererのUser Value(32bit)のうち、Fake Shadowが使う8bitの開始位置")]
+        public int userValueShift = 0;
         [Range(1, FakeShadowManager.SHADOW_LIMIT)]
         public int maxShadowCount = 9; // 3x3
         public int decalMapSize = 512;
@@ -283,7 +343,7 @@ namespace UTJ {
 
         #region DEPTH PASS
         /// <summary>
-        /// CharacterレイヤーのDepth pass
+        /// CharacterレイヤーのDepth pass (Use Rendering Layers無効時のみ)
         /// </summary>
         class CharacterDepthPass : ScriptableRenderPass {
             public LayerMask layerMask = 0;
@@ -325,15 +385,25 @@ namespace UTJ {
         class CharacterShadowPass : ScriptableRenderPass {
             public LayerMask layerMask = 0;
             public int decalMapSize = 512;
+            public Material overrideMaterial = null;
 
-            private ShaderTagId FAKE_SHADER_TAG_ID = new ShaderTagId("FakeShadow");
+            // CharacterのShaderに依らず描画する為、通常描画のPassを対象にMaterialを差し替える
+            // FakeShadowはShadow Mesh(Fake Shadow描画専用)用
+            // NOTE: 対象のPassを複数持つShaderはその数だけ描画される
+            private static readonly List<ShaderTagId> SHADER_TAG_IDS = new List<ShaderTagId> {
+                new ShaderTagId("UniversalForward"),
+                new ShaderTagId("UniversalForwardOnly"),
+                new ShaderTagId("SRPDefaultUnlit"),
+                new ShaderTagId("FakeShadow"),
+            };
             private int DECAL_MAP_ID = Shader.PropertyToID("_DecalTexture");
             // DecalProjectorのPassはRender Graph上でこのTextureの利用を宣言しないので、
             // Transientにするとエイリアシングされうる。Featureで保持してImportする
             private RTHandle decalMap = null;
 
             public CharacterShadowPass() {
-                this.renderPassEvent = RenderPassEvent.AfterRenderingPrePasses;
+                // 他のPassに依存しないので、Main/Additional LightのShadow Map生成と連続させてRender Targetの切り替えを抑える
+                this.renderPassEvent = RenderPassEvent.AfterRenderingShadows;
 #if ENABLE_PROFILING
                 base.profilingSampler = new ProfilingSampler("Character - FakeShadow Pass");
 #endif
@@ -357,7 +427,11 @@ namespace UTJ {
 
                 using (var builder = renderGraph.AddRasterRenderPass<DrawPassData>(this.passName, out var passData, this.profilingSampler)) {
                     // DecalをGPU Instancingする為にDecal Map一つにグリッドで描画する
-                    var drawSettings = RenderingUtils.CreateDrawingSettings(FAKE_SHADER_TAG_ID, renderingData, cameraData, lightData, SortingCriteria.OptimizeStateChanges);
+                    // 共通Materialで描画し、Character毎のデータはRenderer User Valueのインデックスでグローバル配列から引く（SRP Batcherで1バッチになる）
+                    var drawSettings = RenderingUtils.CreateDrawingSettings(SHADER_TAG_IDS, renderingData, cameraData, lightData, SortingCriteria.OptimizeStateChanges);
+                    drawSettings.overrideMaterial = this.overrideMaterial;
+                    drawSettings.overrideMaterialPassIndex = 0;
+                    drawSettings.perObjectData = PerObjectData.None;
                     var filteringSettings = new FilteringSettings(RenderQueueRange.opaque, this.layerMask);
                     passData.rendererList = renderGraph.CreateRendererList(new RendererListParams(renderingData.cullResults, drawSettings, filteringSettings));
 
@@ -377,14 +451,26 @@ namespace UTJ {
 
         #region OPAQUE PASS
         /// <summary>
-        /// CharacterレイヤーのOpaque pass
+        /// CharacterレイヤーのOpaque pass (Use Rendering Layers無効時のみ)
+        /// Decalの後に描画してDecal Shadowを上書きする
         /// </summary>
         class CharacterOpaquePass : ScriptableRenderPass {
             public LayerMask layerMask = 0;
             public bool useDepthPriming = false;
+            public bool disableDBuffer = false;
+
+            class OpaquePassData : DrawPassData {
+                public bool disableDBuffer;
+            }
 
             private ShaderTagId SHADER_TAG_ID = new ShaderTagId("UniversalForward");
             private RenderStateBlock renderStateBlock;
+            // DBufferのKeywordはカメラ終了時まで有効なままなので、上書き時は明示的に無効化する
+            private static readonly GlobalKeyword[] s_DBufferKeywords = {
+                GlobalKeyword.Create("_DBUFFER_MRT1"),
+                GlobalKeyword.Create("_DBUFFER_MRT2"),
+                GlobalKeyword.Create("_DBUFFER_MRT3"),
+            };
 
             public CharacterOpaquePass() {
                 this.renderPassEvent = RenderPassEvent.AfterRenderingSkybox; // after DecalPass
@@ -409,18 +495,28 @@ namespace UTJ {
                     this.renderStateBlock.mask |= RenderStateMask.Depth;
                 }
 
-                using (var builder = renderGraph.AddRasterRenderPass<DrawPassData>(this.passName, out var passData, this.profilingSampler)) {
+                using (var builder = renderGraph.AddRasterRenderPass<OpaquePassData>(this.passName, out var passData, this.profilingSampler)) {
                     var sortFlags = cameraData.defaultOpaqueSortFlags;
                     if (this.useDepthPriming)
                         sortFlags = SortingCriteria.SortingLayer | SortingCriteria.RenderQueue | SortingCriteria.OptimizeStateChanges;
                     var drawSettings = RenderingUtils.CreateDrawingSettings(SHADER_TAG_ID, renderingData, cameraData, lightData, sortFlags);
                     var filteringSettings = new FilteringSettings(RenderQueueRange.opaque, this.layerMask);
                     passData.rendererList = CreateRendererList(renderGraph, renderingData.cullResults, drawSettings, filteringSettings, this.renderStateBlock);
+                    passData.disableDBuffer = this.disableDBuffer;
 
                     builder.UseRendererList(passData.rendererList);
                     builder.SetRenderAttachment(resourceData.activeColorTexture, 0, AccessFlags.ReadWrite);
                     builder.SetRenderAttachmentDepth(resourceData.activeDepthTexture, AccessFlags.ReadWrite);
-                    builder.SetRenderFunc<DrawPassData>(ExecuteDrawPass);
+                    if (this.disableDBuffer)
+                        builder.AllowGlobalStateModification(true);
+                    builder.SetRenderFunc<OpaquePassData>(static (data, context) => {
+                        if (data.disableDBuffer) {
+                            // 以降のTransparentはDBufferを参照しないので戻さない（URPもカメラ終了時に無効化する）
+                            foreach (var keyword in s_DBufferKeywords)
+                                context.cmd.SetKeyword(keyword, false);
+                        }
+                        context.cmd.DrawRendererList(data.rendererList);
+                    });
                 }
             }
         }
@@ -428,22 +524,90 @@ namespace UTJ {
 
 
         System.Reflection.PropertyInfo propUseDepthPriming = null;
+        // DecalRendererFeatureの設定取得用 (いずれもinternal/protectedの為)
+        static readonly System.Reflection.PropertyInfo s_PropRendererFeatures = typeof(ScriptableRenderer).GetProperty("rendererFeatures", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        static readonly System.Reflection.MethodInfo s_MethodGetTechnique = typeof(DecalRendererFeature).GetMethod("GetTechnique", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance, null, new[] { typeof(ScriptableRenderer) }, null);
+        static readonly System.Reflection.PropertyInfo s_PropRequiresDecalLayers = typeof(DecalRendererFeature).GetProperty("requiresDecalLayers", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        private readonly object[] getTechniqueArgs = new object[1];
+        private ScriptableRenderer cachedRenderer = null;
+        private DecalTechnique cachedTechnique = DecalTechnique.Invalid;
+        private bool cachedDecalLayers = false;
+        private bool warned = false;
+#if UNITY_EDITOR
+        static readonly System.Reflection.PropertyInfo s_PropOpaqueLayerMask = typeof(UniversalRenderer).GetProperty("opaqueLayerMask", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        private int maskWarnState = 0;
+#endif
+
+        /// <summary>
+        /// 同じRendererのDecalRendererFeatureからTechniqueとUse Rendering Layersを取得
+        /// </summary>
+        private DecalTechnique GetDecalTechnique(ScriptableRenderer renderer) {
+#if !UNITY_EDITOR
+            // ランタイムでの設定変更は非対応なのでキャッシュする（EditorではInspectorでの変更に追従させる）
+            if (this.cachedRenderer == renderer)
+                return this.cachedTechnique;
+#endif
+            this.cachedRenderer = renderer;
+            this.cachedTechnique = DecalTechnique.Invalid;
+            this.cachedDecalLayers = false;
+
+            var features = (List<ScriptableRendererFeature>)s_PropRendererFeatures.GetValue(renderer);
+            foreach (var feature in features) {
+                if (feature is DecalRendererFeature decal) {
+                    this.getTechniqueArgs[0] = renderer;
+                    this.cachedTechnique = (DecalTechnique)(int)s_MethodGetTechnique.Invoke(decal, this.getTechniqueArgs);
+                    this.getTechniqueArgs[0] = null;
+                    this.cachedDecalLayers = (bool)s_PropRequiresDecalLayers.GetValue(decal);
+                    return this.cachedTechnique;
+                }
+            }
+
+            if (!this.warned) {
+                Debug.LogWarning("FakeShadowPassFeature requires DecalRendererFeature in the same renderer. FakeShadow is disabled.");
+                this.warned = true;
+            }
+            return DecalTechnique.Invalid;
+        }
+
+#if UNITY_EDITOR
+        /// <summary>
+        /// Use Rendering LayersとOpaque Layer Maskの不整合の警告
+        /// </summary>
+        private void ValidateLayerMask(ScriptableRenderer renderer) {
+            if (!(renderer is UniversalRenderer))
+                return;
+            var opaqueMask = ((LayerMask)s_PropOpaqueLayerMask.GetValue(renderer)).value;
+            var state = 0;
+            if (this.cachedDecalLayers && (opaqueMask & this.characterLayer.value) != this.characterLayer.value)
+                state = 1;
+            else if (!this.cachedDecalLayers && (opaqueMask & this.characterLayer.value) != 0)
+                state = 2;
+            if (state == this.maskWarnState)
+                return;
+            this.maskWarnState = state;
+            if (state == 1)
+                Debug.LogWarning($"FakeShadowPassFeature: \"Use Rendering Layers\" is enabled, include Character Layer in \"Opaque Layer Mask\" and \"Prepass Layer Mask\" of the renderer. (Opaque Layer Mask: 0x{opaqueMask:X})");
+            else if (state == 2)
+                Debug.LogWarning("FakeShadowPassFeature: \"Use Rendering Layers\" is disabled, Character Layer is drawn twice. Exclude Character Layer from \"Opaque Layer Mask\" of the renderer.");
+        }
+#endif
 
         public override void Create() {
-            if (this.propUseDepthPriming != null)
+            if (this.shadowPass != null)
                 return;
 
             this.depthPass = new CharacterDepthPass();
             this.shadowPass = new CharacterShadowPass();
             this.opaquePass = new CharacterOpaquePass();
-
             this.fakeShadow = new FakeShadowManager(this.fakeShadowShader);
+            RenderPipelineManager.beginContextRendering += this.OnBeginContextRendering;
 
             var universalRendererType = typeof(UniversalRenderer);
             this.propUseDepthPriming = universalRendererType.GetProperty("useDepthPriming", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
         }
 
         protected override void Dispose(bool disposing) {
+            RenderPipelineManager.beginContextRendering -= this.OnBeginContextRendering;
             this.depthPass = null;
             this.shadowPass?.Dispose();
             this.shadowPass = null;
@@ -451,9 +615,64 @@ namespace UTJ {
             this.fakeShadow?.Dispose();
             this.fakeShadow = null;
             this.propUseDepthPriming = null;
+            this.cachedRenderer = null;
+            this.warned = false;
+#if UNITY_EDITOR
+            this.maskWarnState = 0;
+#endif
+        }
+
+        /// <summary>
+        /// リクエスト処理はDecalProjectorを変更するので、カメラ毎の描画処理より前に行う
+        /// DBufferではDecalRendererFeature.AddRenderPassesでDrawCall Jobが発行されるので、AddRenderPasses内で変更すると競合する
+        /// </summary>
+        private void OnBeginContextRendering(ScriptableRenderContext context, List<Camera> cameras) {
+            // DecalRendererFeatureが無い、または非対応のTechniqueの場合は何もしない（判定はAddRenderPassesで更新）
+            if (this.cachedTechnique == DecalTechnique.Invalid || this.cachedTechnique == DecalTechnique.GBuffer)
+                return;
+
+            this.fakeShadow.SetAvailableCount(this.maxShadowCount, this.decalMapSize); // 有効数の変更、ランタイムで変更したい場合は要改変、実行数より有効数を減らされた場合の例外対応に注意
+            this.fakeShadow.SetUserValueShift(this.userValueShift);
+            this.fakeShadow.ResolveRequests(); // リクエスト処理
+            FakeShadowManager.SetGlobalShadowData();
         }
 
         public override void AddRenderPasses(ScriptableRenderer renderer, ref RenderingData renderingData) {
+            var technique = this.GetDecalTechnique(renderer);
+            if (technique == DecalTechnique.Invalid)
+                return;
+            if (technique == DecalTechnique.GBuffer) {
+                if (!this.warned) {
+                    Debug.LogWarning("FakeShadowPassFeature does not support Decal GBuffer technique (Deferred). FakeShadow is disabled.");
+                    this.warned = true;
+                }
+                return;
+            }
+#if UNITY_EDITOR
+            this.ValidateLayerMask(renderer);
+#endif
+
+            // support to modify in runtime
+            this.shadowPass.layerMask = this.characterLayer;
+            this.shadowPass.decalMapSize = this.decalMapSize;
+            this.shadowPass.overrideMaterial = this.fakeShadow.material;
+            // Materialを差し替えずに描画するとCharacterそのものがDecal Mapに描かれる
+            if (this.shadowPass.overrideMaterial == null) {
+                if (!this.warned) {
+                    Debug.LogWarning("FakeShadowPassFeature: \"Fake Shadow Shader\" is not set. FakeShadow is disabled.");
+                    this.warned = true;
+                }
+                return;
+            }
+            this.warned = false;
+
+            // Decal Map生成(AfterRenderingShadows)はDecal Pass (DBuffer: AfterRenderingPrePasses + 1 / Screen Space: AfterRenderingSkybox) より前に行う
+            renderer.EnqueuePass(this.shadowPass);
+
+            // Use Rendering Layers有効時はDecal LayersでCharacterを除外するので追加のPassは不要
+            if (this.cachedDecalLayers)
+                return;
+
             // Decalを利用するのでDepth Textureは必ずあるという前提
             // 本サンプルはDepth Priming有効で期待しているので決め打ちにしてもいい
             // ATTENTION: Not supported the case that chaging DepthPrimingMode in runtime when available shadows exist.
@@ -467,23 +686,17 @@ namespace UTJ {
                 Debug.LogError("not supported \"Depth Texture Mode\" to \"Force Prepass\" in URP Asset");
 #endif
 
-            // support to modify in runtime
             this.depthPass.layerMask = this.characterLayer;
             this.opaquePass.layerMask = this.characterLayer;
-            this.shadowPass.layerMask = this.characterLayer;
-            this.shadowPass.decalMapSize = this.decalMapSize;
 
             this.opaquePass.useDepthPriming = useDepthPriming;
+            this.opaquePass.disableDBuffer = technique == DecalTechnique.DBuffer;
             if (useDepthPriming)
                 this.depthPass.renderPassEvent = RenderPassEvent.AfterRenderingPrePasses;
             else
                 this.depthPass.renderPassEvent = RenderPassEvent.AfterRenderingOpaques; // for CopyDepth
 
-            this.fakeShadow.SetAvailableCount(this.maxShadowCount, this.decalMapSize); // 有効数の変更、ランタイムで変更したい場合は要改変、実行数より有効数を減らされた場合の例外対応に注意
-            this.fakeShadow.ResolveRequests(); // リクエスト処理
-
             renderer.EnqueuePass(this.depthPass);
-            renderer.EnqueuePass(this.shadowPass);
             renderer.EnqueuePass(this.opaquePass);
         }
     }
