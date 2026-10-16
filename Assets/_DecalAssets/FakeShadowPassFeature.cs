@@ -4,9 +4,12 @@
 #endif
 
 using System.Collections.Generic;
+using Unity.Collections;
 using UnityEngine;
 using UnityEngine.Rendering;
+using UnityEngine.Rendering.RenderGraphModule;
 using UnityEngine.Rendering.Universal;
+using UnityEngine.Experimental.Rendering;
 
 namespace UTJ {
     #region FAKE SHADOW
@@ -244,6 +247,40 @@ namespace UTJ {
         private CharacterOpaquePass opaquePass = null;
 
 
+        #region RENDER GRAPH COMMON
+        /// <summary>
+        /// RendererListを描画するだけのRaster Pass共通データ
+        /// </summary>
+        class DrawPassData {
+            public RendererListHandle rendererList;
+        }
+
+        static void ExecuteDrawPass(DrawPassData data, RasterGraphContext context) {
+            context.cmd.DrawRendererList(data.rendererList);
+        }
+
+        static readonly ShaderTagId[] s_ShaderTagValues = new ShaderTagId[1];
+        static readonly RenderStateBlock[] s_RenderStateBlocks = new RenderStateBlock[1];
+
+        /// <summary>
+        /// RenderStateBlockを全体に適用するRendererListの生成 (RenderingUtils.CreateRendererListWithRenderStateBlockがinternalの為)
+        /// </summary>
+        static RendererListHandle CreateRendererList(RenderGraph renderGraph, in CullingResults cullResults, in DrawingSettings ds, in FilteringSettings fs, in RenderStateBlock rsb) {
+            if (rsb.mask == RenderStateMask.Nothing)
+                return renderGraph.CreateRendererList(new RendererListParams(cullResults, ds, fs));
+
+            s_ShaderTagValues[0] = ShaderTagId.none;
+            s_RenderStateBlocks[0] = rsb;
+            var param = new RendererListParams(cullResults, ds, fs) {
+                tagValues = new NativeArray<ShaderTagId>(s_ShaderTagValues, Allocator.Temp),
+                stateBlocks = new NativeArray<RenderStateBlock>(s_RenderStateBlocks, Allocator.Temp),
+                isPassTagName = false
+            };
+            return renderGraph.CreateRendererList(param);
+        }
+        #endregion
+
+
         #region DEPTH PASS
         /// <summary>
         /// CharacterレイヤーのDepth pass
@@ -252,37 +289,30 @@ namespace UTJ {
             public LayerMask layerMask = 0;
 
             private ShaderTagId SHADER_TAG_ID = new ShaderTagId("DepthOnly");
-            private RenderStateBlock renderStateBlock;
 
             public CharacterDepthPass() {
-                this.renderPassEvent = RenderPassEvent.AfterRenderingPrePasses; // 
-                this.renderStateBlock = new RenderStateBlock(RenderStateMask.Nothing);
-
+                this.renderPassEvent = RenderPassEvent.AfterRenderingPrePasses; //
 #if ENABLE_PROFILING
                 base.profilingSampler = new ProfilingSampler("Character - Depth Pass");
 #endif
             }
 
-            public override void OnCameraSetup(CommandBuffer cmd, ref RenderingData renderingData) {
-                ConfigureTarget(renderingData.cameraData.renderer.cameraDepthTarget);
-            }
+            public override void RecordRenderGraph(RenderGraph renderGraph, ContextContainer frameData) {
+                var resourceData = frameData.Get<UniversalResourceData>();
+                var renderingData = frameData.Get<UniversalRenderingData>();
+                var cameraData = frameData.Get<UniversalCameraData>();
+                var lightData = frameData.Get<UniversalLightData>();
 
-            public override void Execute(ScriptableRenderContext context, ref RenderingData renderingData) {
-#if ENABLE_PROFILING
-                var cmd = CommandBufferPool.Get();
-                using (new ProfilingScope(cmd, this.profilingSampler)) {
-                    context.ExecuteCommandBuffer(cmd);
-                    cmd.Clear();
-#endif
-                    var depthDrawSettings = CreateDrawingSettings(SHADER_TAG_ID, ref renderingData, SortingCriteria.CommonOpaque);
+                using (var builder = renderGraph.AddRasterRenderPass<DrawPassData>(this.passName, out var passData, this.profilingSampler)) {
+                    var depthDrawSettings = RenderingUtils.CreateDrawingSettings(SHADER_TAG_ID, renderingData, cameraData, lightData, SortingCriteria.CommonOpaque);
                     depthDrawSettings.perObjectData = PerObjectData.None;
                     var depthFilteringSettings = new FilteringSettings(RenderQueueRange.opaque, this.layerMask);
-                    context.DrawRenderers(renderingData.cullResults, ref depthDrawSettings, ref depthFilteringSettings, ref this.renderStateBlock);
-#if ENABLE_PROFILING
+                    passData.rendererList = renderGraph.CreateRendererList(new RendererListParams(renderingData.cullResults, depthDrawSettings, depthFilteringSettings));
+
+                    builder.UseRendererList(passData.rendererList);
+                    builder.SetRenderAttachmentDepth(resourceData.activeDepthTexture, AccessFlags.ReadWrite);
+                    builder.SetRenderFunc<DrawPassData>(ExecuteDrawPass);
                 }
-                context.ExecuteCommandBuffer(cmd);
-                CommandBufferPool.Release(cmd);
-#endif
             }
         }
         #endregion
@@ -297,51 +327,49 @@ namespace UTJ {
             public int decalMapSize = 512;
 
             private ShaderTagId FAKE_SHADER_TAG_ID = new ShaderTagId("FakeShadow");
-            private RenderStateBlock renderStateBlock;
             private int DECAL_MAP_ID = Shader.PropertyToID("_DecalTexture");
+            // DecalProjectorのPassはRender Graph上でこのTextureの利用を宣言しないので、
+            // Transientにするとエイリアシングされうる。Featureで保持してImportする
+            private RTHandle decalMap = null;
 
             public CharacterShadowPass() {
                 this.renderPassEvent = RenderPassEvent.AfterRenderingPrePasses;
-                this.renderStateBlock = new RenderStateBlock(RenderStateMask.Nothing);
-
 #if ENABLE_PROFILING
                 base.profilingSampler = new ProfilingSampler("Character - FakeShadow Pass");
 #endif
             }
 
-            public override void OnCameraSetup(CommandBuffer cmd, ref RenderingData renderingData) {
-                var desc = new RenderTextureDescriptor(this.decalMapSize, this.decalMapSize, UnityEngine.Experimental.Rendering.GraphicsFormat.R8G8B8A8_SRGB, 0, 0);
+            public void Dispose() {
+                this.decalMap?.Release();
+                this.decalMap = null;
+            }
+
+            public override void RecordRenderGraph(RenderGraph renderGraph, ContextContainer frameData) {
+                var renderingData = frameData.Get<UniversalRenderingData>();
+                var cameraData = frameData.Get<UniversalCameraData>();
+                var lightData = frameData.Get<UniversalLightData>();
+
+                var format = QualitySettings.activeColorSpace == ColorSpace.Linear ? GraphicsFormat.R8G8B8A8_SRGB : GraphicsFormat.R8G8B8A8_UNorm;
+                var desc = new RenderTextureDescriptor(this.decalMapSize, this.decalMapSize, format, 0, 0);
                 desc.msaaSamples = 1;
-                desc.sRGB = (QualitySettings.activeColorSpace == ColorSpace.Linear);
-                cmd.GetTemporaryRT(DECAL_MAP_ID, desc, FilterMode.Bilinear);
+                RenderingUtils.ReAllocateHandleIfNeeded(ref this.decalMap, desc, FilterMode.Bilinear, TextureWrapMode.Clamp, name: "_DecalTexture");
+                var decalMapHandle = renderGraph.ImportTexture(this.decalMap);
 
-                ConfigureTarget(DECAL_MAP_ID);
-                ConfigureClear(ClearFlag.Color, Color.clear);
-            }
-
-            public override void Execute(ScriptableRenderContext context, ref RenderingData renderingData) {
-#if ENABLE_PROFILING
-                var cmd = CommandBufferPool.Get();
-                using (new ProfilingScope(cmd, this.profilingSampler)) {
-                    context.ExecuteCommandBuffer(cmd);
-                    cmd.Clear();
-#endif
+                using (var builder = renderGraph.AddRasterRenderPass<DrawPassData>(this.passName, out var passData, this.profilingSampler)) {
                     // DecalをGPU Instancingする為にDecal Map一つにグリッドで描画する
-                    var drawSettings = CreateDrawingSettings(FAKE_SHADER_TAG_ID, ref renderingData, SortingCriteria.OptimizeStateChanges);
+                    var drawSettings = RenderingUtils.CreateDrawingSettings(FAKE_SHADER_TAG_ID, renderingData, cameraData, lightData, SortingCriteria.OptimizeStateChanges);
                     var filteringSettings = new FilteringSettings(RenderQueueRange.opaque, this.layerMask);
-                    context.DrawRenderers(renderingData.cullResults, ref drawSettings, ref filteringSettings, ref this.renderStateBlock);
-#if ENABLE_PROFILING
-                }
-                context.ExecuteCommandBuffer(cmd);
-                CommandBufferPool.Release(cmd);
-#endif
-            }
-            public override void OnCameraCleanup(CommandBuffer cmd) {
-                if (cmd == null) {
-                    throw new System.ArgumentNullException("cmd");
-                }
+                    passData.rendererList = renderGraph.CreateRendererList(new RendererListParams(renderingData.cullResults, drawSettings, filteringSettings));
 
-                cmd.ReleaseTemporaryRT(DECAL_MAP_ID);
+                    builder.UseRendererList(passData.rendererList);
+                    builder.SetRenderAttachment(decalMapHandle, 0, AccessFlags.Write);
+                    builder.SetGlobalTextureAfterPass(decalMapHandle, DECAL_MAP_ID);
+                    builder.AllowPassCulling(false);
+                    builder.SetRenderFunc<DrawPassData>(static (data, context) => {
+                        context.cmd.ClearRenderTarget(RTClearFlags.Color, Color.clear, 1f, 0);
+                        context.cmd.DrawRendererList(data.rendererList);
+                    });
+                }
             }
         }
         #endregion
@@ -367,7 +395,12 @@ namespace UTJ {
 #endif
             }
 
-            public override void OnCameraSetup(CommandBuffer cmd, ref RenderingData renderingData) {
+            public override void RecordRenderGraph(RenderGraph renderGraph, ContextContainer frameData) {
+                var resourceData = frameData.Get<UniversalResourceData>();
+                var renderingData = frameData.Get<UniversalRenderingData>();
+                var cameraData = frameData.Get<UniversalCameraData>();
+                var lightData = frameData.Get<UniversalLightData>();
+
                 if (this.useDepthPriming) {
                     this.renderStateBlock.depthState = new DepthState(false, CompareFunction.Equal);
                     this.renderStateBlock.mask |= RenderStateMask.Depth;
@@ -375,26 +408,20 @@ namespace UTJ {
                     this.renderStateBlock.depthState = new DepthState(true, CompareFunction.LessEqual);
                     this.renderStateBlock.mask |= RenderStateMask.Depth;
                 }
-            }
 
-            public override void Execute(ScriptableRenderContext context, ref RenderingData renderingData) {
-#if ENABLE_PROFILING
-                var cmd = CommandBufferPool.Get();
-                using (new ProfilingScope(cmd, this.profilingSampler)) {
-                    context.ExecuteCommandBuffer(cmd);
-                    cmd.Clear();
-#endif
-                    var sortFlags = renderingData.cameraData.defaultOpaqueSortFlags;
+                using (var builder = renderGraph.AddRasterRenderPass<DrawPassData>(this.passName, out var passData, this.profilingSampler)) {
+                    var sortFlags = cameraData.defaultOpaqueSortFlags;
                     if (this.useDepthPriming)
                         sortFlags = SortingCriteria.SortingLayer | SortingCriteria.RenderQueue | SortingCriteria.OptimizeStateChanges;
-                    var drawSettings = CreateDrawingSettings(SHADER_TAG_ID, ref renderingData, sortFlags);
+                    var drawSettings = RenderingUtils.CreateDrawingSettings(SHADER_TAG_ID, renderingData, cameraData, lightData, sortFlags);
                     var filteringSettings = new FilteringSettings(RenderQueueRange.opaque, this.layerMask);
-                    context.DrawRenderers(renderingData.cullResults, ref drawSettings, ref filteringSettings, ref this.renderStateBlock);
-#if ENABLE_PROFILING
+                    passData.rendererList = CreateRendererList(renderGraph, renderingData.cullResults, drawSettings, filteringSettings, this.renderStateBlock);
+
+                    builder.UseRendererList(passData.rendererList);
+                    builder.SetRenderAttachment(resourceData.activeColorTexture, 0, AccessFlags.ReadWrite);
+                    builder.SetRenderAttachmentDepth(resourceData.activeDepthTexture, AccessFlags.ReadWrite);
+                    builder.SetRenderFunc<DrawPassData>(ExecuteDrawPass);
                 }
-                context.ExecuteCommandBuffer(cmd);
-                CommandBufferPool.Release(cmd);
-#endif
             }
         }
         #endregion
@@ -418,6 +445,7 @@ namespace UTJ {
 
         protected override void Dispose(bool disposing) {
             this.depthPass = null;
+            this.shadowPass?.Dispose();
             this.shadowPass = null;
             this.opaquePass = null;
             this.fakeShadow?.Dispose();
@@ -429,12 +457,12 @@ namespace UTJ {
             // Decalを利用するのでDepth Textureは必ずあるという前提
             // 本サンプルはDepth Priming有効で期待しているので決め打ちにしてもいい
             // ATTENTION: Not supported the case that chaging DepthPrimingMode in runtime when available shadows exist.
-            var useDepthPriming = (bool)this.propUseDepthPriming.GetValue(renderingData.cameraData.renderer);
+            var useDepthPriming = (bool)this.propUseDepthPriming.GetValue(renderer);
 
 #if UNITY_EDITOR
             // Depth Priming Modeが無効かつCopyDepthの為にDepthPrepassを走らせるとイベントが正常に差し込めないので非対応
             var memberCopyDepthMode = typeof(UniversalRenderer).GetField("m_CopyDepthMode", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-            var depthPrepass = useDepthPriming | (CopyDepthMode)memberCopyDepthMode.GetValue(renderingData.cameraData.renderer) == CopyDepthMode.ForcePrepass;
+            var depthPrepass = useDepthPriming | (CopyDepthMode)memberCopyDepthMode.GetValue(renderer) == CopyDepthMode.ForcePrepass;
             if (!useDepthPriming && depthPrepass)
                 Debug.LogError("not supported \"Depth Texture Mode\" to \"Force Prepass\" in URP Asset");
 #endif

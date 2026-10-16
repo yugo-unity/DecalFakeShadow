@@ -52,10 +52,11 @@ Shader "UTJ/SimpleLitFakeShadow"
 
         UsePass "Universal Render Pipeline/Simple Lit/ForwardLit"
         UsePass "Universal Render Pipeline/Simple Lit/DepthOnly"
+        UsePass "Universal Render Pipeline/Simple Lit/ShadowCaster"
 
         Pass
         {
-            Name "ShadowCaster"
+            Name "FakeShadow"
             Tags{"LightMode" = "FakeShadow"}
 
             ZWrite Off
