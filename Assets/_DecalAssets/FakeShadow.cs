@@ -149,10 +149,21 @@ namespace UTJ {
             FakeShadowManager.SetShadowMatrix(this.shadowIndex, this.projection * this.view);
             FakeShadowManager.SetShadowClip(this.shadowIndex, this.glidClipping);
 
+            // NOTE: renderingLayerMaskのsetterはDecalの描画データを更新しないので、更新が走るuvScale/uvBiasより先に設定する
+            this.projector.renderingLayerMask = param.receiverRenderingLayers;
             this.projector.uvScale = param.uvScale;
             this.projector.uvBias = param.uvBias;
 
             this.state |= STATE.AVAIRABLE;
+        }
+
+        /// <summary>
+        /// Fake Shadowを受けるRendering Layer Maskの変更
+        /// </summary>
+        internal void ChangeReceiverRenderingLayers(RenderingLayerMask mask) {
+            this.projector.renderingLayerMask = mask;
+            // renderingLayerMaskのsetterはDecalの描画データを更新しないので、更新が走るuvBiasを再設定する
+            this.projector.uvBias = this.projector.uvBias;
         }
 
         /// <summary>

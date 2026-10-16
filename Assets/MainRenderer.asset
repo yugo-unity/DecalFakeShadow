@@ -16,7 +16,7 @@ MonoBehaviour:
   m_Settings:
     technique: 2
     maxDrawDistance: 10
-    decalLayers: 0
+    decalLayers: 1
     dBufferSettings:
       surfaceData: 2
     screenSpaceSettings:
@@ -55,10 +55,10 @@ MonoBehaviour:
   m_AssetVersion: 3
   m_PrepassLayerMask:
     serializedVersion: 2
-    m_Bits: 39
+    m_Bits: 4294967295
   m_OpaqueLayerMask:
     serializedVersion: 2
-    m_Bits: 39
+    m_Bits: 4294967295
   m_TransparentLayerMask:
     serializedVersion: 2
     m_Bits: 4294967295
@@ -71,7 +71,7 @@ MonoBehaviour:
     zFailOperation: 0
   m_ShadowTransparentReceive: 1
   m_RenderingMode: 0
-  m_DepthPrimingMode: 2
+  m_DepthPrimingMode: 1
   m_CopyDepthMode: 0
   m_DepthAttachmentFormat: 0
   m_DepthTextureFormat: 0
@@ -90,10 +90,13 @@ MonoBehaviour:
   m_Name: FakeShadowPassFeature
   m_EditorClassIdentifier: 
   m_Active: 1
-  characterLayer:
+  shadowCasterLayer:
     serializedVersion: 2
     m_Bits: 64
   fakeShadowShader: {fileID: 4800000, guid: 45b2d29dd53159e44b9d21ec63d25600, type: 3}
   userValueShift: 0
+  receiverRenderingLayers:
+    serializedVersion: 0
+    m_Bits: 1
   maxShadowCount: 4
   decalMapSize: 512

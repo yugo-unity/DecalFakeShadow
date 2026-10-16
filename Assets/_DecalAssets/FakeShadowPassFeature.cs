@@ -21,6 +21,7 @@ namespace UTJ {
             public Vector2 uvBias;
             public Material material;   // Shadow Mesh用の共通Material
             public int userValueShift;
+            public RenderingLayerMask receiverRenderingLayers; // Decal ProjectorのRendering Layer Mask
         }
 
         public const int SHADOW_LIMIT = 25; // 1024の16分割で256を限界値として想定、FakeShadowCaster.shaderのFAKE_SHADOW_LIMITと合わせる
@@ -51,6 +52,7 @@ namespace UTJ {
         private int availableCount = 0;
         private float mapSize = 1f;
         private int userValueShift = 0;
+        private RenderingLayerMask receiverRenderingLayers = 1u; // Default
         #endregion
 
 
@@ -161,6 +163,18 @@ namespace UTJ {
         }
 
         /// <summary>
+        /// Fake Shadowを受けるRendering Layer Maskの設定 (Decal ProjectorのRendering Layer Maskを上書きする)
+        /// </summary>
+        internal void SetReceiverRenderingLayers(RenderingLayerMask mask) {
+            if (this.receiverRenderingLayers.value == mask.value)
+                return;
+
+            this.receiverRenderingLayers = mask;
+            foreach (var shadow in this.available.Keys)
+                shadow.ChangeReceiverRenderingLayers(mask);
+        }
+
+        /// <summary>
         /// User Valueのbit位置の設定
         /// </summary>
         /// <param name="shift">User Valueの何bit目から8bitを使うか</param>
@@ -205,6 +219,7 @@ namespace UTJ {
 
                 this.matParams[index].material = this._material;
                 this.matParams[index].userValueShift = this.userValueShift;
+                this.matParams[index].receiverRenderingLayers = this.receiverRenderingLayers;
                 req.Setup(in this.matParams[index]);
             }
         }
@@ -275,28 +290,22 @@ namespace UTJ {
     #endregion
 
     /// <summary>
-    /// CharacterをDecal Shadowから除外する方法はDecalRendererFeatureの"Use Rendering Layers"で切り替わる
-    ///   - 有効: CharacterはRenderer標準のPrepass/Opaque Passで描画する（Opaque/Prepass Layer MaskにCharacterを含めること）
-    ///           Characterの Rendering Layer Mask を Decal Projector の Rendering Layer Mask から外す
-    ///   - 無効: CharacterをDecalより後に描画して上書きする（Opaque Layer MaskからCharacterを外すこと）
+    /// Shadow Caster Layer(Character)をDecal Shadowから除外する方法はDecalRendererFeatureの"Use Rendering Layers"で切り替わる
+    ///   - 有効: CharacterはRenderer標準のPrepass/Opaque Passで描画する（Opaque/Prepass Layer MaskにShadow Caster Layerを含めること）
+    ///           Characterの Rendering Layer Mask を Receiver Rendering Layers から外す
+    ///   - 無効: CharacterをDecalより後に描画して上書きする（Opaque Layer MaskからShadow Caster Layerを外すこと）
     /// Decal RendererFeatureのTechnique(Screen Space / DBuffer)は手動で切り替える（ランタイムでの切替は非対応、Editor上での切替は可）
     /// </summary>
     public class FakeShadowPassFeature : ScriptableRendererFeature {
-        /// <summary>
-        /// DecalRendererFeatureで解決されたTechnique (URP内部のDecalTechniqueと同値)
-        /// </summary>
-        private enum DecalTechnique {
-            Invalid,
-            DBuffer,
-            ScreenSpace,
-            GBuffer,     // 非対応
-        }
-
-        public LayerMask characterLayer = 0;
+        [UnityEngine.Serialization.FormerlySerializedAs("characterLayer")]
+        [Tooltip("Fake Shadowを落とすオブジェクトのLayer。Use Rendering Layers無効時はDecalより後に描画して上書きする対象にもなる")]
+        public LayerMask shadowCasterLayer = 0;
         [Tooltip("Fake Shadowの描画に使うShader (UTJ/FakeShadowCaster)。Characterのマテリアルを差し替えて描画する")]
         public Shader fakeShadowShader = null;
         [Range(0, FakeShadowManager.USER_VALUE_SHIFT_MAX), Tooltip("RendererのUser Value(32bit)のうち、Fake Shadowが使う8bitの開始位置")]
         public int userValueShift = 0;
+        [Tooltip("Fake Shadowを受けるRendering Layer。FakeShadowが管理するDecal ProjectorのRendering Layer Maskを上書きする (DecalRendererFeatureのUse Rendering Layersが有効な場合のみ機能する)")]
+        public RenderingLayerMask receiverRenderingLayers = 1u; // Default
         [Range(1, FakeShadowManager.SHADOW_LIMIT)]
         public int maxShadowCount = 9; // 3x3
         public int decalMapSize = 512;
@@ -353,7 +362,7 @@ namespace UTJ {
             public CharacterDepthPass() {
                 this.renderPassEvent = RenderPassEvent.AfterRenderingPrePasses; //
 #if ENABLE_PROFILING
-                base.profilingSampler = new ProfilingSampler("Character - Depth Pass");
+                base.profilingSampler = new ProfilingSampler("Fake Shadow - Depth Pass");
 #endif
             }
 
@@ -405,7 +414,7 @@ namespace UTJ {
                 // 他のPassに依存しないので、Main/Additional LightのShadow Map生成と連続させてRender Targetの切り替えを抑える
                 this.renderPassEvent = RenderPassEvent.AfterRenderingShadows;
 #if ENABLE_PROFILING
-                base.profilingSampler = new ProfilingSampler("Character - FakeShadow Pass");
+                base.profilingSampler = new ProfilingSampler("Fake Shadow - Shadow Pass");
 #endif
             }
 
@@ -477,7 +486,7 @@ namespace UTJ {
                 this.renderStateBlock = new RenderStateBlock(RenderStateMask.Nothing);
 
 #if ENABLE_PROFILING
-                base.profilingSampler = new ProfilingSampler("Character - Opaque Pass");
+                base.profilingSampler = new ProfilingSampler("Fake Shadow - Opaque Pass");
 #endif
             }
 
@@ -523,18 +532,15 @@ namespace UTJ {
         #endregion
 
 
-        System.Reflection.PropertyInfo propUseDepthPriming = null;
-        // DecalRendererFeatureの設定取得用 (いずれもinternal/protectedの為)
+        // protectedの為Reflectionで取得 (internalはURPRuntime.asmrefで直接参照)
         static readonly System.Reflection.PropertyInfo s_PropRendererFeatures = typeof(ScriptableRenderer).GetProperty("rendererFeatures", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-        static readonly System.Reflection.MethodInfo s_MethodGetTechnique = typeof(DecalRendererFeature).GetMethod("GetTechnique", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance, null, new[] { typeof(ScriptableRenderer) }, null);
-        static readonly System.Reflection.PropertyInfo s_PropRequiresDecalLayers = typeof(DecalRendererFeature).GetProperty("requiresDecalLayers", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-        private readonly object[] getTechniqueArgs = new object[1];
         private ScriptableRenderer cachedRenderer = null;
         private DecalTechnique cachedTechnique = DecalTechnique.Invalid;
         private bool cachedDecalLayers = false;
         private bool warned = false;
 #if UNITY_EDITOR
-        static readonly System.Reflection.PropertyInfo s_PropOpaqueLayerMask = typeof(UniversalRenderer).GetProperty("opaqueLayerMask", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        // privateの為Reflectionで取得
+        static readonly System.Reflection.FieldInfo s_FieldCopyDepthMode = typeof(UniversalRenderer).GetField("m_CopyDepthMode", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
         private int maskWarnState = 0;
 #endif
 
@@ -554,10 +560,8 @@ namespace UTJ {
             var features = (List<ScriptableRendererFeature>)s_PropRendererFeatures.GetValue(renderer);
             foreach (var feature in features) {
                 if (feature is DecalRendererFeature decal) {
-                    this.getTechniqueArgs[0] = renderer;
-                    this.cachedTechnique = (DecalTechnique)(int)s_MethodGetTechnique.Invoke(decal, this.getTechniqueArgs);
-                    this.getTechniqueArgs[0] = null;
-                    this.cachedDecalLayers = (bool)s_PropRequiresDecalLayers.GetValue(decal);
+                    this.cachedTechnique = decal.GetTechnique(renderer);
+                    this.cachedDecalLayers = decal.requiresDecalLayers;
                     return this.cachedTechnique;
                 }
             }
@@ -574,23 +578,35 @@ namespace UTJ {
         /// Use Rendering LayersとOpaque Layer Maskの不整合の警告
         /// </summary>
         private void ValidateLayerMask(ScriptableRenderer renderer) {
-            if (!(renderer is UniversalRenderer))
+            if (!(renderer is UniversalRenderer universalRenderer))
                 return;
-            var opaqueMask = ((LayerMask)s_PropOpaqueLayerMask.GetValue(renderer)).value;
+            var opaqueMask = universalRenderer.opaqueLayerMask.value;
             var state = 0;
-            if (this.cachedDecalLayers && (opaqueMask & this.characterLayer.value) != this.characterLayer.value)
+            if (this.cachedDecalLayers && (opaqueMask & this.shadowCasterLayer.value) != this.shadowCasterLayer.value)
                 state = 1;
-            else if (!this.cachedDecalLayers && (opaqueMask & this.characterLayer.value) != 0)
+            else if (!this.cachedDecalLayers && (opaqueMask & this.shadowCasterLayer.value) != 0)
                 state = 2;
             if (state == this.maskWarnState)
                 return;
             this.maskWarnState = state;
             if (state == 1)
-                Debug.LogWarning($"FakeShadowPassFeature: \"Use Rendering Layers\" is enabled, include Character Layer in \"Opaque Layer Mask\" and \"Prepass Layer Mask\" of the renderer. (Opaque Layer Mask: 0x{opaqueMask:X})");
+                Debug.LogWarning($"FakeShadowPassFeature: \"Use Rendering Layers\" is enabled, include Shadow Caster Layer in \"Opaque Layer Mask\" and \"Prepass Layer Mask\" of the renderer. (Opaque Layer Mask: 0x{opaqueMask:X})");
             else if (state == 2)
-                Debug.LogWarning("FakeShadowPassFeature: \"Use Rendering Layers\" is disabled, Character Layer is drawn twice. Exclude Character Layer from \"Opaque Layer Mask\" of the renderer.");
+                Debug.LogWarning("FakeShadowPassFeature: \"Use Rendering Layers\" is disabled, Shadow Caster Layer is drawn twice. Exclude Shadow Caster Layer from \"Opaque Layer Mask\" of the renderer.");
         }
 #endif
+
+        /// <summary>
+        /// Rendering Layerの書き出しタイミングの申告 (URP内部API、URPRuntime.asmrefでURPのアセンブリに含めて上書きする)
+        /// 既定実装はRendering Layerを使わない場合もDepthNormalPrePassを申告し、全Featureの申告の早い方が採用されるので
+        /// Screen Space Decal (Opaqueで書き出し) でもDepthNormals Prepassが発生してしまう
+        /// FakeShadowPassFeature自体はRendering Layerを使わないので、Opaqueを申告して他のFeatureの要求を妨げない
+        /// </summary>
+        internal override bool RequireRenderingLayers(bool isDeferred, bool needsGBufferAccurateNormals, out RenderingLayerUtils.Event atEvent, out RenderingLayerUtils.MaskSize maskSize) {
+            atEvent = RenderingLayerUtils.Event.Opaque;
+            maskSize = RenderingLayerUtils.MaskSize.Bits8;
+            return false;
+        }
 
         public override void Create() {
             if (this.shadowPass != null)
@@ -601,9 +617,6 @@ namespace UTJ {
             this.opaquePass = new CharacterOpaquePass();
             this.fakeShadow = new FakeShadowManager(this.fakeShadowShader);
             RenderPipelineManager.beginContextRendering += this.OnBeginContextRendering;
-
-            var universalRendererType = typeof(UniversalRenderer);
-            this.propUseDepthPriming = universalRendererType.GetProperty("useDepthPriming", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
         }
 
         protected override void Dispose(bool disposing) {
@@ -614,7 +627,6 @@ namespace UTJ {
             this.opaquePass = null;
             this.fakeShadow?.Dispose();
             this.fakeShadow = null;
-            this.propUseDepthPriming = null;
             this.cachedRenderer = null;
             this.warned = false;
 #if UNITY_EDITOR
@@ -633,6 +645,7 @@ namespace UTJ {
 
             this.fakeShadow.SetAvailableCount(this.maxShadowCount, this.decalMapSize); // 有効数の変更、ランタイムで変更したい場合は要改変、実行数より有効数を減らされた場合の例外対応に注意
             this.fakeShadow.SetUserValueShift(this.userValueShift);
+            this.fakeShadow.SetReceiverRenderingLayers(this.receiverRenderingLayers);
             this.fakeShadow.ResolveRequests(); // リクエスト処理
             FakeShadowManager.SetGlobalShadowData();
         }
@@ -653,7 +666,7 @@ namespace UTJ {
 #endif
 
             // support to modify in runtime
-            this.shadowPass.layerMask = this.characterLayer;
+            this.shadowPass.layerMask = this.shadowCasterLayer;
             this.shadowPass.decalMapSize = this.decalMapSize;
             this.shadowPass.overrideMaterial = this.fakeShadow.material;
             // Materialを差し替えずに描画するとCharacterそのものがDecal Mapに描かれる
@@ -676,18 +689,17 @@ namespace UTJ {
             // Decalを利用するのでDepth Textureは必ずあるという前提
             // 本サンプルはDepth Priming有効で期待しているので決め打ちにしてもいい
             // ATTENTION: Not supported the case that chaging DepthPrimingMode in runtime when available shadows exist.
-            var useDepthPriming = (bool)this.propUseDepthPriming.GetValue(renderer);
+            var useDepthPriming = renderer.useDepthPriming;
 
 #if UNITY_EDITOR
             // Depth Priming Modeが無効かつCopyDepthの為にDepthPrepassを走らせるとイベントが正常に差し込めないので非対応
-            var memberCopyDepthMode = typeof(UniversalRenderer).GetField("m_CopyDepthMode", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-            var depthPrepass = useDepthPriming | (CopyDepthMode)memberCopyDepthMode.GetValue(renderer) == CopyDepthMode.ForcePrepass;
+            var depthPrepass = useDepthPriming | (CopyDepthMode)s_FieldCopyDepthMode.GetValue(renderer) == CopyDepthMode.ForcePrepass;
             if (!useDepthPriming && depthPrepass)
                 Debug.LogError("not supported \"Depth Texture Mode\" to \"Force Prepass\" in URP Asset");
 #endif
 
-            this.depthPass.layerMask = this.characterLayer;
-            this.opaquePass.layerMask = this.characterLayer;
+            this.depthPass.layerMask = this.shadowCasterLayer;
+            this.opaquePass.layerMask = this.shadowCasterLayer;
 
             this.opaquePass.useDepthPriming = useDepthPriming;
             this.opaquePass.disableDBuffer = technique == DecalTechnique.DBuffer;
