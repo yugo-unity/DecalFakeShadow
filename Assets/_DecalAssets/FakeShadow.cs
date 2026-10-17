@@ -3,11 +3,13 @@ using UnityEngine.Rendering.Universal;
 using System.Runtime.CompilerServices;
 
 namespace UTJ {
-    [RequireComponent(typeof(Renderer))]
     /// <summary>
     /// DecalProjectorを利用したトップビューの疑似影
     /// RendererのUser Valueに割当インデックスを書き込み、FakeShadowPassFeatureが共通Materialで描画する
+    /// Edit ModeでもScene View/Game Viewに描画する
     /// </summary>
+    [RequireComponent(typeof(Renderer))]
+    [ExecuteAlways]
     public class FakeShadow : MonoBehaviour {
         [Tooltip("対応するDecal Projector参照")]
         public DecalProjector projector = null; // NOTE: 暗黙(HideInspector)でDecalProjectorを生成しても良さそう
@@ -18,13 +20,13 @@ namespace UTJ {
         [SerializeField, Tooltip("Shadow Meshである、Runtimeでの変更をしてはいけない")]
         private bool shadowMesh = false;
         [SerializeField, Tooltip("DecalProjector範囲からはみ出た部分をClipする")]
-        private bool _glidClipping = false;
+        private bool _gridClipping = false;
 
         [System.Flags]
         private enum STATE {
             NONE,
             REQUEST,    // リクエスト済
-            AVAIRABLE,  // 設定済
+            AVAILABLE,  // 設定済
         }
 
         private new Renderer renderer = null;
@@ -37,17 +39,21 @@ namespace UTJ {
         private Matrix4x4 view = Matrix4x4.identity;
         private int shadowIndex = -1;
         private int userValueShift = -1; // 書き込み済みのUser Valueのbit位置
+        // Shadow Meshの共通Material割当前のMaterial
+        // NOTE: Domain Reload時のホットリロードではprivateフィールドもシリアライズされ、nullが空配列で復元されるので対象外にする
+        [System.NonSerialized]
+        private Material[] originalMaterials = null;
 
         internal bool isShadowMesh { get => this.shadowMesh; }
         internal bool isRequested { get => this.state.HasFlag(STATE.REQUEST); }
-        public bool glidClipping {
-            get => this._glidClipping;
+        public bool gridClipping {
+            get => this._gridClipping;
             set {
-                if (this._glidClipping == value)
+                if (this._gridClipping == value)
                     return;
-                this._glidClipping = value;
+                this._gridClipping = value;
                 if (this.shadowIndex >= 0)
-                    FakeShadowManager.SetShadowClip(this.shadowIndex, this._glidClipping);
+                    FakeShadowManager.SetShadowClip(this.shadowIndex, this._gridClipping);
             }
         }
 
@@ -63,48 +69,72 @@ namespace UTJ {
         /// 起動
         /// </summary>
         public void Wakeup() {
-            Debug.Assert(this.projector != null, "Set the reference of DecalProjector");
+            if (this.projector == null) {
+                Debug.LogError($"Set the reference of DecalProjector : {this.name}", this);
+                return;
+            }
 
             if (this.renderer == null)
                 this.renderer = this.GetComponent<Renderer>();
             if (this.root == null)
                 this.root = this.projector.transform;
 
-            var ret = FakeShadowManager.Request(this);
-            if (ret) {
-                this.state |= STATE.REQUEST;
-                this.projector.enabled = true;
-            } else {
-                Debug.LogError("Failed to request for FakeShadow. Increase the max count.");
-                this.projector.enabled = false;
-            }
+            // NOTE: Projectorの有効化はSetupで行う
+            // OnEnableはScene/Domainのロード中に呼ばれ、ここで有効化するとUnityによるProjectorの有効化と重複してOnEnableが2回走る
+            // 割当数の不足はFakeShadowManager.ResolveRequestsで判定する
+            FakeShadowManager.Request(this);
+            this.state |= STATE.REQUEST;
         }
 
         /// <summary>
         /// 停止
         /// </summary>
-        public void Sleep(bool returnShadow=true) {
-            if (returnShadow && this.state.HasFlag(STATE.AVAIRABLE))
+        public void Sleep() {
+            this.Stop(returnShadow: true);
+        }
+
+        /// <summary>
+        /// FakeShadowManagerによる打ち切り（割当数の不足等）
+        /// インデックスはManager側で回収済み、または未割当なので返却しない
+        /// </summary>
+        internal void Cancel() {
+            this.Stop(returnShadow: false);
+        }
+
+        private void Stop(bool returnShadow) {
+            if (returnShadow && this.state.HasFlag(STATE.AVAILABLE))
                 FakeShadowManager.Return(this);
 
-            this.state = 0; // cleared REQUEST/AVAIRABLE
-            this.projector.enabled = false;
+            this.state = 0; // cleared REQUEST/AVAILABLE
+            // Scene破棄時はDecalProjectorが先に破棄されている場合がある
+            if (this.projector != null)
+                this.projector.enabled = false;
             this.ClearUserValue();
+            this.RestoreMaterials();
         }
 
         /// <summary>
         /// FakeShadowManager破棄時の一時停止（リクエスト状態に戻して再設定を待つ）
         /// </summary>
         internal void Suspend() {
-            this.state &= ~STATE.AVAIRABLE;
+            this.state &= ~STATE.AVAILABLE;
             this.ClearUserValue();
+        }
+
+        void LateUpdate() {
+#if UNITY_EDITOR
+            // Edit ModeではLateUpdateが毎フレーム呼ばれないので、FakeShadowPassFeatureが描画前に更新する
+            if (!Application.isPlaying)
+                return;
+#endif
+            this.UpdateShadow();
         }
 
         /// <summary>
         /// パラメータ更新
         /// </summary>
-        void LateUpdate() {
-            if (!this.state.HasFlag(STATE.AVAIRABLE))
+        internal void UpdateShadow() {
+            if (!this.state.HasFlag(STATE.AVAILABLE))
                 return;
 
             var updated = this.UpdateProjection();
@@ -126,7 +156,7 @@ namespace UTJ {
 
         /// <summary>
         /// FakeShadowManagerからの設定
-        /// 既に稼働中でAvairableCountが変更された場合にも再設定される
+        /// 既に稼働中でAvailableCountが変更された場合にも再設定される
         /// </summary>
         /// <param name="param">設定パラメータ</param>
         internal void Setup(in FakeShadowManager.MatParam param) {
@@ -139,6 +169,12 @@ namespace UTJ {
             // Shadow MeshはFake Shadow描画専用なので共通Materialを割り当てる（通常描画のPassを持たない）
             if (this.shadowMesh) {
                 var materials = this.renderer.sharedMaterials;
+                if (this.originalMaterials == null) {
+                    this.originalMaterials = (Material[])materials.Clone();
+#if UNITY_EDITOR
+                    s_AssignedShadowMeshes.Add(this);
+#endif
+                }
                 for (var i = 0; i < materials.Length; ++i)
                     materials[i] = param.material;
                 this.renderer.sharedMaterials = materials;
@@ -147,14 +183,15 @@ namespace UTJ {
             this.shadowIndex = param.index;
             this.ApplyUserValue(param.userValueShift);
             FakeShadowManager.SetShadowMatrix(this.shadowIndex, this.projection * this.view);
-            FakeShadowManager.SetShadowClip(this.shadowIndex, this.glidClipping);
+            FakeShadowManager.SetShadowClip(this.shadowIndex, this.gridClipping);
 
             // NOTE: renderingLayerMaskのsetterはDecalの描画データを更新しないので、更新が走るuvScale/uvBiasより先に設定する
             this.projector.renderingLayerMask = param.receiverRenderingLayers;
             this.projector.uvScale = param.uvScale;
             this.projector.uvBias = param.uvBias;
+            this.projector.enabled = true;
 
-            this.state |= STATE.AVAIRABLE;
+            this.state |= STATE.AVAILABLE;
         }
 
         /// <summary>
@@ -196,6 +233,46 @@ namespace UTJ {
             this.userValueShift = -1;
             this.shadowIndex = -1;
         }
+
+        /// <summary>
+        /// Shadow Meshに割り当てた共通Materialを元に戻す
+        /// </summary>
+        private void RestoreMaterials() {
+            if (this.originalMaterials == null)
+                return;
+            if (this.renderer != null)
+                this.renderer.sharedMaterials = this.originalMaterials;
+            this.originalMaterials = null;
+#if UNITY_EDITOR
+            s_AssignedShadowMeshes.Remove(this);
+#endif
+        }
+
+#if UNITY_EDITOR
+        // 共通MaterialはHideAndDontSaveなので、Edit Modeで割り当てたままSceneに保存させない
+        private static readonly System.Collections.Generic.HashSet<FakeShadow> s_AssignedShadowMeshes = new System.Collections.Generic.HashSet<FakeShadow>(FakeShadowReferenceComparer.instance);
+        private static readonly System.Collections.Generic.Dictionary<FakeShadow, Material[]> s_SavingMaterials = new System.Collections.Generic.Dictionary<FakeShadow, Material[]>(FakeShadowReferenceComparer.instance);
+
+        [UnityEditor.InitializeOnLoadMethod]
+        private static void RegisterSceneSaveCallbacks() {
+            UnityEditor.SceneManagement.EditorSceneManager.sceneSaving += (scene, path) => {
+                s_AssignedShadowMeshes.RemoveWhere(shadow => shadow == null);
+                foreach (var shadow in s_AssignedShadowMeshes) {
+                    if (shadow.gameObject.scene != scene || shadow.renderer == null)
+                        continue;
+                    s_SavingMaterials.Add(shadow, shadow.renderer.sharedMaterials);
+                    shadow.renderer.sharedMaterials = shadow.originalMaterials;
+                }
+            };
+            UnityEditor.SceneManagement.EditorSceneManager.sceneSaved += scene => {
+                foreach (var pair in s_SavingMaterials) {
+                    if (pair.Key != null && pair.Key.renderer != null)
+                        pair.Key.renderer.sharedMaterials = pair.Value;
+                }
+                s_SavingMaterials.Clear();
+            };
+        }
+#endif
 
         private uint GetUserValue() {
             if (this.renderer is SkinnedMeshRenderer smr)

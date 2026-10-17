@@ -35,10 +35,10 @@ Shader "UTJ/FakeShadowByDecal"
         // --------------------------------------------------
         // Structs and Packing
 
+        // NOTE: Decal UVはDepthから復元するので、メッシュのUVは使わない
         struct Attributes
         {
              float3 positionOS : POSITION;
-             float4 uv0 : TEXCOORD0;
 #if UNITY_ANY_INSTANCING_ENABLED
              uint instanceID : INSTANCEID_SEMANTIC;
 #endif
@@ -46,126 +46,64 @@ Shader "UTJ/FakeShadowByDecal"
         struct Varyings
         {
              float4 positionCS : SV_POSITION;
-             float4 texCoord0;
 #if UNITY_ANY_INSTANCING_ENABLED
              uint instanceID : CUSTOM_INSTANCE_ID;
 #endif
         };
-        struct PackedVaryings
-        {
-             float4 positionCS : SV_POSITION;
-             float4 interp0 : INTERP0;
-#if UNITY_ANY_INSTANCING_ENABLED
-             uint instanceID : CUSTOM_INSTANCE_ID;
-#endif
-        };
-
-        PackedVaryings PackVaryings(Varyings input)
-        {
-            PackedVaryings output;
-            ZERO_INITIALIZE(PackedVaryings, output);
-            output.positionCS = input.positionCS;
-            output.interp0.xyzw = input.texCoord0;
-#if UNITY_ANY_INSTANCING_ENABLED
-            output.instanceID = input.instanceID;
-#endif
-            return output;
-        }
-
-        Varyings UnpackVaryings(PackedVaryings input)
-        {
-            Varyings output;
-            output.positionCS = input.positionCS;
-            output.texCoord0 = input.interp0.xyzw;
-#if UNITY_ANY_INSTANCING_ENABLED
-            output.instanceID = input.instanceID;
-#endif
-            return output;
-        }
 
 
         // --------------------------------------------------
-        // Graph
+        // Properties
 
         CBUFFER_START(UnityPerMaterial)
-        float4 _DecalTexture_TexelSize;
         float4 _Base_Color;
         CBUFFER_END
 
-        //SAMPLER(SamplerState_Linear_Repeat);
+        // FakeShadowPassFeatureがグローバルに設定するDecal Map
         TEXTURE2D(_DecalTexture);
         SAMPLER(sampler_DecalTexture);
 
         // --------------------------------------------------
         // Functions
 
-        half4 GetSurfaceColor(Varyings input, uint2 positionSS, float angleFadeFactor)
+        half4 GetSurfaceColor(float2 texCoord, half angleFadeFactor)
         {
             half4x4 normalToWorld = UNITY_ACCESS_INSTANCED_PROP(Decal, _NormalToWorld);
             half fadeFactor = clamp(normalToWorld[0][3], 0.0f, 1.0f) * angleFadeFactor;
+            // DecalProjectorのuvScale/uvBiasでDecal Mapのグリッドを参照する
             float2 scale = float2(normalToWorld[3][0], normalToWorld[3][1]);
             float2 offset = float2(normalToWorld[3][2], normalToWorld[3][3]);
-            input.texCoord0.xy = input.texCoord0.xy * scale + offset;
 
-            UnityTexture2D _Property_Out_0 = UnityBuildTexture2DStructNoScale(_DecalTexture);
-            float4 _SampleTexture2D_RGBA_0 = SAMPLE_TEXTURE2D(_Property_Out_0.tex, _Property_Out_0.samplerstate, _Property_Out_0.GetTransformedUV(input.texCoord0.xy));
-            float3 surfaceColor = _SampleTexture2D_RGBA_0.rgb * _Base_Color.rgb;
-            float surfaceAlpha = _SampleTexture2D_RGBA_0.a;
-
-            return half4(surfaceColor.r, surfaceColor.g, surfaceColor.b, surfaceAlpha * fadeFactor);
+            float4 color = SAMPLE_TEXTURE2D(_DecalTexture, sampler_DecalTexture, texCoord * scale + offset);
+            return half4(color.rgb * _Base_Color.rgb, color.a * fadeFactor);
         }
 
         // --------------------------------------------------
         // Main
 
-        Varyings BuildVaryings(Attributes input)
+        Varyings Vert(Attributes input)
         {
             Varyings output = (Varyings)0;
 
             UNITY_SETUP_INSTANCE_ID(input);
-
             UNITY_TRANSFER_INSTANCE_ID(input, output);
             UNITY_INITIALIZE_VERTEX_OUTPUT_STEREO(output);
 
-            // TODO: Avoid path via VertexPositionInputs (Universal)
-            VertexPositionInputs vertexInput = GetVertexPositionInputs(input.positionOS.xyz);
-
             // Returns the camera relative position (if enabled)
             float3 positionWS = TransformObjectToWorld(input.positionOS);
-
             output.positionCS = TransformWorldToHClip(positionWS);
 
-            output.texCoord0 = input.uv0;
-
-#ifdef EDITOR_VISUALIZATION
-            float2 VizUV = 0;
-            float4 LightCoord = 0;
-            UnityEditorVizData(input.positionOS, input.uv0, input.uv1, input.uv2, VizUV, LightCoord);
-#endif
-
             return output;
-        }
-
-        PackedVaryings Vert(Attributes inputMesh)
-        {
-            Varyings output = (Varyings)0;
-            output = BuildVaryings(inputMesh);
-
-            PackedVaryings packedOutput = (PackedVaryings)0;
-            packedOutput = PackVaryings(output);
-
-            return packedOutput;
         }
 
         /// <summary>
         /// Decal色の算出 (Screen Space / DBuffer 共通)
         /// </summary>
         /// <param name="screenSpace">Screen SpaceのみUVのFlipが必要</param>
-        half4 FragDecal(PackedVaryings packedInput, bool screenSpace)
+        half4 FragDecal(Varyings input, bool screenSpace)
         {
-            UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(packedInput);
-            UNITY_SETUP_INSTANCE_ID(packedInput);
-            Varyings input = UnpackVaryings(packedInput);
+            UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(input);
+            UNITY_SETUP_INSTANCE_ID(input);
 
             half angleFadeFactor = 1.0;
 
@@ -202,7 +140,6 @@ Shader "UTJ/FakeShadowByDecal"
             clip(clipValue);
 
             float2 texCoord = positionDS.xz + float2(0.5, 0.5);
-            input.texCoord0.xy = texCoord;
 
 #ifdef DECAL_ANGLE_FADE
     #if defined(_DECAL_NORMAL_BLEND_HIGH)
@@ -226,7 +163,7 @@ Shader "UTJ/FakeShadowByDecal"
             }
 #endif
 
-            return GetSurfaceColor(input, (uint2)positionSS, angleFadeFactor);
+            return GetSurfaceColor(texCoord, angleFadeFactor);
         }
 
         ENDHLSL
@@ -259,9 +196,9 @@ Shader "UTJ/FakeShadowByDecal"
             #pragma multi_compile_fragment _ _DECAL_LAYERS
             #pragma target 4.5 _DECAL_LAYERS
 
-            void Frag(PackedVaryings packedInput, out half4 outColor : SV_Target0)
+            void Frag(Varyings input, out half4 outColor : SV_Target0)
             {
-                outColor = FragDecal(packedInput, true);
+                outColor = FragDecal(input, true);
             }
             ENDHLSL
         }
@@ -303,10 +240,10 @@ Shader "UTJ/FakeShadowByDecal"
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DBuffer.hlsl"
 
-            void Frag(PackedVaryings packedInput, OUTPUT_DBUFFER(outDBuffer))
+            void Frag(Varyings input, OUTPUT_DBUFFER(outDBuffer))
             {
                 // DBuffer0のalphaは(1-alpha)の積算となり、Opaqueで baseColor * alpha + rgb として合成される
-                outDBuffer0 = FragDecal(packedInput, false);
+                outDBuffer0 = FragDecal(input, false);
 #if defined(_DBUFFER_MRT2) || defined(_DBUFFER_MRT3)
                 outDBuffer1 = 0;
 #endif

@@ -2435,7 +2435,7 @@ GameObject:
   - component: {fileID: 1975229715}
   - component: {fileID: 1975229716}
   m_Layer: 6
-  m_Name: Decal Projector
+  m_Name: Decal Projector - Blob
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
