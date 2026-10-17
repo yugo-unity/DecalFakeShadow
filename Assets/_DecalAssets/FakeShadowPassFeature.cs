@@ -24,7 +24,18 @@ namespace UTJ {
         public int GetHashCode(FakeShadow obj) => System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(obj);
     }
 
-    internal class FakeShadowManager {
+    /// <summary>
+    /// FakeShadowの割当管理 (Domain内で1つ)
+    /// FakeShadowPassFeatureは設定値を渡すだけで、稼働状態はFeatureの生成・破棄 (Renderer設定の変更等) に依らず保持する
+    ///
+    /// NOTE: Domain Reloadなし (Enter Play Mode Options) ではstaticの値がPlay Modeを跨いで残る
+    ///   - 稼働状態 (requests/available) はFakeShadowのOnEnable/OnDisableで整合するのでクリアしない
+    ///     (Scene Reloadなしでは Edit Modeで稼働中のFakeShadowが再OnEnableされないので、クリアすると取りこぼす)
+    ///   - 破棄済みのFakeShadowは参照比較で区別し、ResolveRequests/UpdateShadowsで読み捨てる
+    ///   - ランタイムで変更される値 (color) はPlay Mode開始時に初期化する
+    ///   - Shaderのグローバル値はDomain Reloadを跨いで残るので、最初のFeature登録時に設定し直す
+    /// </summary>
+    internal static class FakeShadowManager {
         #region DEFINE
         public struct MatParam {
             public int index;
@@ -44,79 +55,144 @@ namespace UTJ {
         public static readonly int PROP_ID_OFFSETS = Shader.PropertyToID("_FakeShadowOffsets");
         public static readonly int PROP_ID_CLIP_RECTS = Shader.PropertyToID("_FakeShadowClipRects");
         public static readonly Quaternion TOP_ROT = Quaternion.Euler(90f, 0f, 0f);
+        private static readonly Color DEFAULT_COLOR = Color.gray;
         #endregion
 
 
         #region MEMBER
-        private static Stack<FakeShadow> requests = new Stack<FakeShadow>(SHADOW_LIMIT);
-        private static FakeShadowManager instance = null;
+        // NOTE: requestsはRenderPassの生成より先にMonoBehaviourのOnEnableが飛ぶのでFeatureに依らず保持する
+        private static readonly Stack<FakeShadow> requests = new Stack<FakeShadow>(SHADOW_LIMIT);
+        private static readonly Dictionary<FakeShadow, int> available = new Dictionary<FakeShadow, int>(SHADOW_LIMIT, FakeShadowReferenceComparer.instance);
+        private static readonly Stack<FakeShadow> cancels = new Stack<FakeShadow>(SHADOW_LIMIT);
+        private static readonly Stack<int> indexStack = new Stack<int>(SHADOW_LIMIT);
+        private static readonly MatParam[] matParams = new MatParam[SHADOW_LIMIT];
         // Character毎のデータ（インデックスはRenderer User Valueの値 - 1）
-        private static Matrix4x4[] s_Matrices = new Matrix4x4[SHADOW_LIMIT]; // Projection * View
-        private static Vector4[] s_Offsets = new Vector4[SHADOW_LIMIT];      // xy: グリッド位置, z: Clip有効
-        private static Vector4[] s_ClipRects = new Vector4[SHADOW_LIMIT];
-        private Dictionary<FakeShadow, int> available = new Dictionary<FakeShadow, int>(SHADOW_LIMIT, FakeShadowReferenceComparer.instance);
-        private Stack<FakeShadow> cancels = new Stack<FakeShadow>(SHADOW_LIMIT);
-        private Stack<int> indexStack = new Stack<int>(SHADOW_LIMIT);
-        private MatParam[] matParams = new MatParam[SHADOW_LIMIT];
-        private Material _material = null;
-        private static Color s_Color = Color.gray; // Managerの生成前後に依らず保持する
-        private int availableCount = 0;
-        private float mapSize = 1f;
-        private int userValueShift = 0;
-        private RenderingLayerMask receiverRenderingLayers = 1u; // Default
+        private static readonly Matrix4x4[] s_Matrices = new Matrix4x4[SHADOW_LIMIT]; // Projection * View
+        private static readonly Vector4[] s_Offsets = new Vector4[SHADOW_LIMIT];      // xy: グリッド位置, z: Clip有効
+        private static readonly Vector4[] s_ClipRects = new Vector4[SHADOW_LIMIT];
+        // 登録中のFeature、先頭のFeatureの設定を使用する
+        private static readonly List<ScriptableRendererFeature> owners = new List<ScriptableRendererFeature>(1);
+        private static Material s_Material = null;
+        private static Color s_Color = DEFAULT_COLOR;
+        private static Color s_DefaultColor = DEFAULT_COLOR; // FakeShadowPassFeatureのGUIで設定された色
+        private static int availableCount = 0; // 0は未設定 (次のSetAvailableCountで全Shadowを再設定する)
+        private static float mapSize = 1f;
+        private static int userValueShift = 0;
+        private static RenderingLayerMask receiverRenderingLayers = 1u; // Default
         #endregion
 
 
         #region MAIN FUNCTION
-        // NOTE: requestsはRenderPassの生成より先にMonoBehaviourのOnEnableが飛ぶのでstaticで保持する
-        // Domain Reloadなしでは前回のPlay Mode/Edit Modeのリクエストが残るが、ResolveRequestsで破棄済み・キャンセル済みを読み捨てるのでクリアしない
-        // (Edit Modeで稼働中のFakeShadowはScene Reloadなしだと再OnEnableされないので、ここでクリアすると取りこぼす)
+        /// <summary>
+        /// Play Mode開始時の初期化 (Domain Reloadなしでも前回のPlay Modeでの変更を持ち越さない)
+        /// Play Mode終了時もEdit Modeに持ち越さないように呼ぶ
+        /// </summary>
+        [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
+        private static void ResetRuntimeValues() {
+            color = s_DefaultColor;
+        }
 
         /// <summary>
-        /// 初期化
+        /// FakeShadowPassFeatureのGUIで設定された影色
+        /// GUIで変更された場合のみ反映し、ランタイムでcolorに設定された色は上書きしない
         /// </summary>
-        /// <param name="fakeShader">Fake Shadow描画用のShader (overrideMaterialとShadow Meshで共通)</param>
-        internal FakeShadowManager(Shader fakeShader) {
-            if (instance != null) {
-                Debug.LogError("FakeShadowManager is duplicated.");
+        internal static void SetDefaultColor(Color defaultColor) {
+            if (s_DefaultColor == defaultColor)
                 return;
-            }
-            instance = this;
+            s_DefaultColor = defaultColor;
+            color = defaultColor;
+        }
 
-            if (fakeShader != null) {
-                this._material = new Material(fakeShader);
-                this._material.hideFlags = HideFlags.HideAndDontSave;
+        /// <summary>
+        /// FakeShadowPassFeatureの登録
+        /// </summary>
+        internal static void Attach(ScriptableRendererFeature owner) {
+            owners.RemoveAll(o => o == null); // Disposeされずに破棄されたFeature
+            if (owners.Contains(owner))
+                return;
+            if (owners.Count == 0) {
+                Shader.SetGlobalColor(PROP_ID_COLOR, s_Color);
+                Shader.SetGlobalInteger(PROP_ID_USER_VALUE_SHIFT, userValueShift);
             }
+            owners.Add(owner);
+        }
 
-            Shader.SetGlobalColor(PROP_ID_COLOR, s_Color);
-            Shader.SetGlobalInteger(PROP_ID_USER_VALUE_SHIFT, this.userValueShift);
-            this.availableCount = 0;
-            this.mapSize = 1;
+        /// <summary>
+        /// FakeShadowPassFeatureの登録解除
+        /// 稼働中のShadowと共通Materialはそのまま保持し、Renderer再生成後のFeatureで引き続き使用する
+        /// (Materialを破棄するとShadow Meshが再設定されるまで描画されない)
+        /// </summary>
+        internal static void Detach(ScriptableRendererFeature owner) {
+            owners.Remove(owner);
+        }
+
+#if UNITY_EDITOR
+        [UnityEditor.InitializeOnLoadMethod]
+        private static void RegisterEditorCallbacks() {
+            // 共通MaterialはHideAndDontSaveなので、Domain Reloadでstatic参照を失う前に破棄する
+            UnityEditor.AssemblyReloadEvents.beforeAssemblyReload += ReleaseMaterial;
+            // Play Modeでの変更をEdit Modeに持ち越さない
+            UnityEditor.EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
+        }
+
+        // Play開始時のFeatureのGUI上の影色 (FeatureはアセットなのでPlay中のGUIでの変更がPlay終了後も残る)
+        private static FakeShadowPassFeature s_PlayFeature = null;
+        private static Color s_PlayFeatureColor = DEFAULT_COLOR;
+
+        private static void OnPlayModeStateChanged(UnityEditor.PlayModeStateChange state) {
+            switch (state) {
+                case UnityEditor.PlayModeStateChange.ExitingEditMode:
+                    s_PlayFeature = owners.Count > 0 ? owners[0] as FakeShadowPassFeature : null;
+                    if (s_PlayFeature != null)
+                        s_PlayFeatureColor = s_PlayFeature.shadowColor;
+                    break;
+                case UnityEditor.PlayModeStateChange.EnteredEditMode:
+                    // Play中にGUIで変更された影色をPlay開始時の色に戻す
+                    if (s_PlayFeature != null) {
+                        s_PlayFeature.shadowColor = s_PlayFeatureColor;
+                        s_DefaultColor = s_PlayFeatureColor;
+                    }
+                    s_PlayFeature = null;
+                    ResetRuntimeValues();
+                    break;
+            }
+        }
+#endif
+
+        /// <summary>
+        /// 設定を反映するFeatureか (複数のFeatureが稼働している場合は先頭のFeatureの設定を使用する)
+        /// </summary>
+        internal static bool IsOwner(ScriptableRendererFeature feature) {
+            return owners.Count > 0 && ReferenceEquals(owners[0], feature);
         }
 
         /// <summary>
         /// 共通Material
         /// </summary>
-        internal Material material { get => this._material; }
+        internal static Material material { get => s_Material; }
 
         /// <summary>
-        /// 破棄
+        /// Fake Shadow描画用のShaderの設定 (overrideMaterialとShadow Meshで共通)
         /// </summary>
-        internal void Dispose() {
-            // Editor上でRenderer設定を変更するとRendererが再生成されFeatureのDispose/Createが走る
-            // 稼働中のShadowは停止せずリクエストに戻し、再生成後のManagerで再設定させる
-            foreach (var shadow in this.available.Keys) {
-                if (shadow == null)
-                    continue;
-                shadow.Suspend();
-                if (!ContainsRequest(shadow))
-                    requests.Push(shadow);
+        internal static void SetShader(Shader shader) {
+            var current = s_Material != null ? s_Material.shader : null;
+            if (current == shader)
+                return;
+
+            ReleaseMaterial();
+            if (shader != null) {
+                s_Material = new Material(shader);
+                s_Material.hideFlags = HideFlags.HideAndDontSave;
             }
-            this.available.Clear();
-            this.indexStack.Clear();
-            Object.DestroyImmediate(this._material);
-            this._material = null;
-            instance = null;
+            availableCount = 0; // Shadow MeshにMaterialを割り当て直す為、全Shadowを再設定する
+        }
+
+        private static void ReleaseMaterial() {
+            if (s_Material == null)
+                return;
+            Object.DestroyImmediate(s_Material);
+            s_Material = null;
+            availableCount = 0; // 再登録時にShadow MeshへMaterialを割り当て直す
         }
 
         /// <summary>
@@ -124,12 +200,12 @@ namespace UTJ {
         /// </summary>
         /// <param name="count">上限値</param>
         /// <param name="decalMapSize">Decal Shadowバッファの解像度</param>
-        internal void SetAvailableCount(int count, float decalMapSize) {
-            if (this.availableCount == count && this.mapSize == decalMapSize)
+        internal static void SetAvailableCount(int count, float decalMapSize) {
+            if (availableCount == count && mapSize == decalMapSize)
                 return;
 
-            this.availableCount = count;
-            this.mapSize = decalMapSize;
+            availableCount = count;
+            mapSize = decalMapSize;
 
             var line = Mathf.Ceil(Mathf.Sqrt(count)); // 累乗でグリッド生成
             var uvScale = 1f / line; // 0~1
@@ -137,8 +213,8 @@ namespace UTJ {
             var onePixel = 1f / decalMapSize;
             var onePixelx2 = 2f / decalMapSize;
 
-            this.indexStack.Clear();
-            for (var i = 0; i < this.availableCount; ++i) {
+            indexStack.Clear();
+            for (var i = 0; i < availableCount; ++i) {
                 // 描画位置、グリッドの中点
                 s_Offsets[i].x = -1f + block * ((float)i % line + 0.5f);
                 s_Offsets[i].y = 1f - block * (Mathf.Floor((float)i / line) + 0.5f);
@@ -146,27 +222,29 @@ namespace UTJ {
                 // Bilinerによってはみ出してくるので1pix内側で切る
                 s_ClipRects[i] = new Vector4(uvBias.x + onePixel, uvBias.y + onePixel, uvScale - onePixelx2, uvScale - onePixelx2);
 
-                this.indexStack.Push(i);
-                this.matParams[i].index = i;
-                this.matParams[i].uvScale = new Vector2(uvScale, uvScale);
-                this.matParams[i].uvBias = uvBias;
+                indexStack.Push(i);
+                matParams[i].index = i;
+                matParams[i].uvScale = new Vector2(uvScale, uvScale);
+                matParams[i].uvBias = uvBias;
             }
 
             // 現在有効なShadowの更新
-            if (this.available.Count > 0) {
-                foreach (var shadow in this.available.Keys) {
-                    if (requests.Count >= this.availableCount) {
+            if (available.Count > 0) {
+                foreach (var shadow in available.Keys) {
+                    if (shadow == null)
+                        continue;
+                    if (requests.Count >= availableCount) {
                         Debug.LogError($"Canceled FakeShadow [{shadow.name}]. The max count is insufficient.");
-                        this.cancels.Push(shadow);
+                        cancels.Push(shadow);
                         continue;
                     }
                     requests.Push(shadow);
                 }
-                this.available.Clear();
+                available.Clear();
                 // インデックスはindexStackの再構築で回収済みなので返却しない
-                foreach (var shadow in this.cancels)
+                foreach (var shadow in cancels)
                     shadow.Cancel();
-                this.cancels.Clear();
+                cancels.Clear();
             }
 
             Shader.SetGlobalFloat(PROP_ID_LINE, line);
@@ -175,70 +253,74 @@ namespace UTJ {
         /// <summary>
         /// Fake Shadowを受けるRendering Layer Maskの設定 (Decal ProjectorのRendering Layer Maskを上書きする)
         /// </summary>
-        internal void SetReceiverRenderingLayers(RenderingLayerMask mask) {
-            if (this.receiverRenderingLayers.value == mask.value)
+        internal static void SetReceiverRenderingLayers(RenderingLayerMask mask) {
+            if (receiverRenderingLayers.value == mask.value)
                 return;
 
-            this.receiverRenderingLayers = mask;
-            foreach (var shadow in this.available.Keys)
-                shadow.ChangeReceiverRenderingLayers(mask);
+            receiverRenderingLayers = mask;
+            foreach (var shadow in available.Keys) {
+                if (shadow != null)
+                    shadow.ChangeReceiverRenderingLayers(mask);
+            }
         }
 
         /// <summary>
         /// User Valueのbit位置の設定
         /// </summary>
         /// <param name="shift">User Valueの何bit目から8bitを使うか</param>
-        internal void SetUserValueShift(int shift) {
+        internal static void SetUserValueShift(int shift) {
             shift = Mathf.Clamp(shift, 0, USER_VALUE_SHIFT_MAX);
-            if (this.userValueShift == shift)
+            if (userValueShift == shift)
                 return;
 
-            this.userValueShift = shift;
-            foreach (var shadow in this.available.Keys)
-                shadow.ChangeUserValueShift(shift);
+            userValueShift = shift;
+            foreach (var shadow in available.Keys) {
+                if (shadow != null)
+                    shadow.ChangeUserValueShift(shift);
+            }
             Shader.SetGlobalInteger(PROP_ID_USER_VALUE_SHIFT, shift);
         }
 
         /// <summary>
         /// 新規リクエストの対応
         /// </summary>
-        internal void ResolveRequests() {
+        internal static void ResolveRequests() {
             while (requests.Count > 0) {
                 var req = requests.Pop();
                 // 破棄済み・キャンセルされた場合は無視
                 if (req == null || !req.isRequested)
                     continue;
-                if (this.available.ContainsKey(req)) {
+                if (available.ContainsKey(req)) {
                     Debug.LogError($"Already available : {req.name}");
                     continue;
                 }
-                if (this.indexStack.Count == 0) {
+                if (indexStack.Count == 0) {
                     Debug.LogError($"Over requests : {req.name}");
                     req.Cancel();
                     continue;
                 }
                 // SkinnedMeshはMeshRendererを分けずにSubMeshの方がオーバーヘッドが低いのでMulti Renderer対応はしない
-                if (req.isShadowMesh && this._material == null) {
+                if (req.isShadowMesh && s_Material == null) {
                     Debug.LogError("Not supported FakeShadow by ShadowMesh. Need the Shader.");
                     req.Cancel();
                     continue;
                 }
 
-                var index = this.indexStack.Pop();
-                this.available.Add(req, index);
+                var index = indexStack.Pop();
+                available.Add(req, index);
 
-                this.matParams[index].material = this._material;
-                this.matParams[index].userValueShift = this.userValueShift;
-                this.matParams[index].receiverRenderingLayers = this.receiverRenderingLayers;
-                req.Setup(in this.matParams[index]);
+                matParams[index].material = s_Material;
+                matParams[index].userValueShift = userValueShift;
+                matParams[index].receiverRenderingLayers = receiverRenderingLayers;
+                req.Setup(in matParams[index]);
             }
         }
 
         /// <summary>
         /// 稼働中のShadowのパラメータ更新 (Edit Mode用、Play ModeではFakeShadow.LateUpdateで行う)
         /// </summary>
-        internal void UpdateShadows() {
-            foreach (var shadow in this.available.Keys) {
+        internal static void UpdateShadows() {
+            foreach (var shadow in available.Keys) {
                 if (shadow != null)
                     shadow.UpdateShadow();
             }
@@ -301,13 +383,13 @@ namespace UTJ {
         /// <summary>
         /// インデックス返却
         /// </summary>
-        /// <param name="index">Requestで取得したインデックス</param>
+        /// <param name="shadow">返却するFakeShadow</param>
         public static bool Return(FakeShadow shadow) {
-            if (instance == null || shadow == null)
+            if (ReferenceEquals(shadow, null))
                 return false;
-            if (instance.available.TryGetValue(shadow, out var index)) {
-                instance.indexStack.Push(index);
-                instance.available.Remove(shadow);
+            if (available.TryGetValue(shadow, out var index)) {
+                indexStack.Push(index);
+                available.Remove(shadow);
                 return true;
             }
             Debug.LogError("Not found to return");
@@ -325,19 +407,21 @@ namespace UTJ {
     /// Decal RendererFeatureのTechnique(Screen Space / DBuffer)は手動で切り替える（ランタイムでの切替は非対応、Editor上での切替は可）
     /// </summary>
     public class FakeShadowPassFeature : ScriptableRendererFeature {
-        [Tooltip("Fake Shadowを落とすオブジェクトのLayer。Use Rendering Layers無効時はDecalより後に描画して上書きする対象にもなる")]
+        [Tooltip("Layers that cast fake shadows.")]
         public LayerMask shadowCasterLayer = 0;
-        [Tooltip("Fake Shadowの描画に使うShader (UTJ/FakeShadowCaster)。Characterのマテリアルを差し替えて描画する")]
+        [Tooltip("Shader that draws casters into the decal map (UTJ/FakeShadowCaster).")]
         public Shader fakeShadowShader = null;
-        [Range(0, FakeShadowManager.USER_VALUE_SHIFT_MAX), Tooltip("RendererのUser Value(32bit)のうち、Fake Shadowが使う8bitの開始位置")]
+        [Range(0, FakeShadowManager.USER_VALUE_SHIFT_MAX), Tooltip("Start bit of the 8 bits FakeShadow uses in the renderer's User Value.")]
         public int userValueShift = 0;
-        [Tooltip("Fake Shadowを受けるRendering Layer。FakeShadowが管理するDecal ProjectorのRendering Layer Maskを上書きする (DecalRendererFeatureのUse Rendering Layersが有効な場合のみ機能する)")]
+        [Tooltip("Rendering layers that receive fake shadows. Requires Use Rendering Layers of the Decal Renderer Feature.")]
         public RenderingLayerMask receiverRenderingLayers = 1u; // Default
-        [Range(1, FakeShadowManager.SHADOW_LIMIT)]
+        [Tooltip("Shadow color, multiplied by the Base Color of the DecalProjector's material. Alpha sets the opacity.")]
+        public Color shadowColor = Color.gray;
+        [Range(1, FakeShadowManager.SHADOW_LIMIT), Tooltip("Maximum number of fake shadows at the same time.")]
         public int maxShadowCount = 9; // 3x3
+        [Tooltip("Resolution of the decal map shared by all fake shadows.")]
         public int decalMapSize = 512;
 
-        private FakeShadowManager fakeShadow = null;
         private CharacterShadowPass shadowPass = null;
         private CharacterOpaquePass opaquePass = null;
 
@@ -413,8 +497,9 @@ namespace UTJ {
                 var cameraData = frameData.Get<UniversalCameraData>();
                 var lightData = frameData.Get<UniversalLightData>();
 
-                var format = QualitySettings.activeColorSpace == ColorSpace.Linear ? GraphicsFormat.R8G8B8A8_SRGB : GraphicsFormat.R8G8B8A8_UNorm;
-                var desc = new RenderTextureDescriptor(this.decalMapSize, this.decalMapSize, format, 0, 0);
+                // Decal Mapは影の被覆率(0/1)のみを持ち、色はFakeShadowByDecalがグローバルの_FakeShadowColorから取る
+                // NOTE: 色をDecal Mapに書くとクリア色(0,0,0,0)とのBilinear補間でエッジのRGBが黒に寄り、Decalのアルファブレンドと二重に掛かって暗い縁が出る
+                var desc = new RenderTextureDescriptor(this.decalMapSize, this.decalMapSize, GraphicsFormat.R8_UNorm, 0, 0);
                 desc.msaaSamples = 1;
                 RenderingUtils.ReAllocateHandleIfNeeded(ref this.decalMap, desc, FilterMode.Bilinear, TextureWrapMode.Clamp, name: "_DecalTexture");
                 var decalMapHandle = renderGraph.ImportTexture(this.decalMap);
@@ -530,12 +615,14 @@ namespace UTJ {
             NO_DECAL_FEATURE = 1 << 0,
             GBUFFER = 1 << 1,
             NO_SHADER = 1 << 2,
+            NOT_OWNER = 1 << 3,
         }
         private WARNING warned = WARNING.NONE;
 #if UNITY_EDITOR
         // privateの為Reflectionで取得
         static readonly System.Reflection.FieldInfo s_FieldCopyDepthMode = typeof(UniversalRenderer).GetField("m_CopyDepthMode", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
         private int maskWarnState = 0;
+        private bool prepassWarned = false;
 #endif
 
         /// <summary>
@@ -583,24 +670,35 @@ namespace UTJ {
 
 #if UNITY_EDITOR
         /// <summary>
-        /// Use Rendering LayersとOpaque Layer Maskの不整合の警告
+        /// Use Rendering Layers・Depth PrimingとOpaque/Prepass Layer Maskの不整合の警告
         /// </summary>
         private void ValidateLayerMask(ScriptableRenderer renderer) {
             if (!(renderer is UniversalRenderer universalRenderer))
                 return;
+            var casterMask = this.shadowCasterLayer.value;
             var opaqueMask = universalRenderer.opaqueLayerMask.value;
+            // NOTE: prepassLayerMaskはCompatibility ModeではOpaque Layer Maskになる、実際にPrepassで使われる値を参照する
+            var prepassMask = universalRenderer.prepassLayerMask.value;
             var state = 0;
-            if (this.cachedDecalLayers && (opaqueMask & this.shadowCasterLayer.value) != this.shadowCasterLayer.value)
+            if (this.cachedDecalLayers && ((opaqueMask & casterMask) != casterMask || (prepassMask & casterMask) != casterMask))
                 state = 1;
-            else if (!this.cachedDecalLayers && (opaqueMask & this.shadowCasterLayer.value) != 0)
+            else if (!this.cachedDecalLayers && (opaqueMask & casterMask) != 0)
                 state = 2;
-            if (state == this.maskWarnState)
-                return;
-            this.maskWarnState = state;
-            if (state == 1)
-                Debug.LogWarning($"FakeShadowPassFeature: \"Use Rendering Layers\" is enabled, include Shadow Caster Layer in \"Opaque Layer Mask\" and \"Prepass Layer Mask\" of the renderer. (Opaque Layer Mask: 0x{opaqueMask:X})");
-            else if (state == 2)
-                Debug.LogWarning("FakeShadowPassFeature: \"Use Rendering Layers\" is disabled, Shadow Caster Layer is drawn twice. Exclude Shadow Caster Layer from \"Opaque Layer Mask\" of the renderer.");
+            if (state != this.maskWarnState) {
+                this.maskWarnState = state;
+                if (state == 1)
+                    Debug.LogWarning($"FakeShadowPassFeature: \"Use Rendering Layers\" is enabled, include Shadow Caster Layer in \"Opaque Layer Mask\" and \"Prepass Layer Mask\" of the renderer. (Opaque Layer Mask: 0x{opaqueMask:X}, Prepass Layer Mask: 0x{prepassMask:X})");
+                else if (state == 2)
+                    Debug.LogWarning("FakeShadowPassFeature: \"Use Rendering Layers\" is disabled, Shadow Caster Layer is drawn twice. Exclude Shadow Caster Layer from \"Opaque Layer Mask\" of the renderer.");
+            }
+
+            // Use Rendering Layers無効時のCharacterOpaquePassは、Depth Priming有効時にPrepassの深度に対してZTest Equalで描画する
+            var prepassMissing = !this.cachedDecalLayers && universalRenderer.useDepthPriming && (prepassMask & casterMask) != casterMask;
+            if (prepassMissing != this.prepassWarned) {
+                this.prepassWarned = prepassMissing;
+                if (prepassMissing)
+                    Debug.LogWarning($"FakeShadowPassFeature: Depth Priming is enabled, include Shadow Caster Layer in \"Prepass Layer Mask\" of the renderer, or Shadow Casters are not drawn. (Prepass Layer Mask: 0x{prepassMask:X})");
+            }
         }
 #endif
 
@@ -622,7 +720,11 @@ namespace UTJ {
 
             this.shadowPass = new CharacterShadowPass();
             this.opaquePass = new CharacterOpaquePass();
-            this.fakeShadow = new FakeShadowManager(this.fakeShadowShader);
+            FakeShadowManager.Attach(this);
+            if (FakeShadowManager.IsOwner(this)) {
+                FakeShadowManager.SetShader(this.fakeShadowShader);
+                FakeShadowManager.SetDefaultColor(this.shadowColor);
+            }
             RenderPipelineManager.beginContextRendering += this.OnBeginContextRendering;
         }
 
@@ -631,12 +733,13 @@ namespace UTJ {
             this.shadowPass?.Dispose();
             this.shadowPass = null;
             this.opaquePass = null;
-            this.fakeShadow?.Dispose();
-            this.fakeShadow = null;
+            // 稼働中のShadowはManagerが保持し、Renderer再生成後のFeatureで再設定される
+            FakeShadowManager.Detach(this);
             this.cachedRenderer = null;
             this.warned = WARNING.NONE;
 #if UNITY_EDITOR
             this.maskWarnState = 0;
+            this.prepassWarned = false;
 #endif
         }
 
@@ -645,18 +748,24 @@ namespace UTJ {
         /// DBufferではDecalRendererFeature.AddRenderPassesでDrawCall Jobが発行されるので、AddRenderPasses内で変更すると競合する
         /// </summary>
         private void OnBeginContextRendering(ScriptableRenderContext context, List<Camera> cameras) {
+            // 複数のFeatureが稼働している場合は先頭のFeatureの設定を使用する
+            if (!FakeShadowManager.IsOwner(this))
+                return;
+            FakeShadowManager.SetShader(this.fakeShadowShader);
+            FakeShadowManager.SetDefaultColor(this.shadowColor);
+
             // DecalRendererFeatureが無い、または非対応のTechniqueの場合は何もしない（判定はAddRenderPassesで更新）
             if (this.cachedTechnique == DecalTechnique.Invalid || this.cachedTechnique == DecalTechnique.GBuffer)
                 return;
 
-            this.fakeShadow.SetAvailableCount(this.maxShadowCount, this.decalMapSize); // 有効数の変更、ランタイムで変更したい場合は要改変、実行数より有効数を減らされた場合の例外対応に注意
-            this.fakeShadow.SetUserValueShift(this.userValueShift);
-            this.fakeShadow.SetReceiverRenderingLayers(this.receiverRenderingLayers);
-            this.fakeShadow.ResolveRequests(); // リクエスト処理
+            FakeShadowManager.SetAvailableCount(this.maxShadowCount, this.decalMapSize); // 有効数の変更、ランタイムで変更したい場合は要改変、実行数より有効数を減らされた場合の例外対応に注意
+            FakeShadowManager.SetUserValueShift(this.userValueShift);
+            FakeShadowManager.SetReceiverRenderingLayers(this.receiverRenderingLayers);
+            FakeShadowManager.ResolveRequests(); // リクエスト処理
 #if UNITY_EDITOR
             // Edit ModeではLateUpdateが毎フレーム呼ばれないので描画前に更新する
             if (!Application.isPlaying)
-                this.fakeShadow.UpdateShadows();
+                FakeShadowManager.UpdateShadows();
 #endif
             FakeShadowManager.SetGlobalShadowData();
         }
@@ -670,11 +779,13 @@ namespace UTJ {
 #if UNITY_EDITOR
             this.ValidateLayerMask(renderer);
 #endif
+            // 描画は行うが、Max Shadow Count等の設定は先頭のFeatureのものが使われる
+            this.UpdateWarning(WARNING.NOT_OWNER, !FakeShadowManager.IsOwner(this), "FakeShadowPassFeature: multiple FakeShadowPassFeatures are active. The settings of the first one are used.");
 
             // support to modify in runtime
             this.shadowPass.layerMask = this.shadowCasterLayer;
             this.shadowPass.decalMapSize = this.decalMapSize;
-            this.shadowPass.overrideMaterial = this.fakeShadow.material;
+            this.shadowPass.overrideMaterial = FakeShadowManager.material;
             // Materialを差し替えずに描画するとCharacterそのものがDecal Mapに描かれる
             if (this.UpdateWarning(WARNING.NO_SHADER, this.shadowPass.overrideMaterial == null, "FakeShadowPassFeature: \"Fake Shadow Shader\" is not set. FakeShadow is disabled."))
                 return;
@@ -688,7 +799,9 @@ namespace UTJ {
 
             // Decalを利用するのでDepth Textureは必ずあるという前提
             // 本サンプルはDepth Priming有効で期待しているので決め打ちにしてもいい
-            // ATTENTION: Not supported the case that chaging DepthPrimingMode in runtime when available shadows exist.
+            // Depth Primingは毎フレーム判定するので、ランタイムでのDepthPrimingModeの切替にも追従する
+            // ATTENTION: Depth Priming有効時はPrepassの深度に対してZTest Equalで描画するので、
+            //            RendererのPrepass Layer MaskにShadow Caster Layerを含めること（含めないとCharacterが描画されない）
             var useDepthPriming = renderer.useDepthPriming;
 
 #if UNITY_EDITOR

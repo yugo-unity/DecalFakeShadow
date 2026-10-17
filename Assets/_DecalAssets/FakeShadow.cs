@@ -11,15 +11,15 @@ namespace UTJ {
     [RequireComponent(typeof(Renderer))]
     [ExecuteAlways]
     public class FakeShadow : MonoBehaviour {
-        [Tooltip("対応するDecal Projector参照")]
+        [Tooltip("DecalProjector that draws this shadow.")]
         public DecalProjector projector = null; // NOTE: 暗黙(HideInspector)でDecalProjectorを生成しても良さそう
-        [Tooltip("OnEnableで自動起動")]
+        [Tooltip("Call Wakeup() automatically in OnEnable.")]
         public bool activeOnEnable = false;
-        [Tooltip("Projectorは動かない")]
+        [Tooltip("The projector does not move (skips view matrix updates).")]
         public bool isStatic = false;
-        [SerializeField, Tooltip("Shadow Meshである、Runtimeでの変更をしてはいけない")]
+        [SerializeField, Tooltip("Use this renderer only for the fake shadow (its materials are replaced). Do not change at runtime.")]
         private bool shadowMesh = false;
-        [SerializeField, Tooltip("DecalProjector範囲からはみ出た部分をClipする")]
+        [SerializeField, Tooltip("Clip the shadow to its own cell of the decal map.")]
         private bool _gridClipping = false;
 
         [System.Flags]
@@ -111,14 +111,6 @@ namespace UTJ {
                 this.projector.enabled = false;
             this.ClearUserValue();
             this.RestoreMaterials();
-        }
-
-        /// <summary>
-        /// FakeShadowManager破棄時の一時停止（リクエスト状態に戻して再設定を待つ）
-        /// </summary>
-        internal void Suspend() {
-            this.state &= ~STATE.AVAILABLE;
-            this.ClearUserValue();
         }
 
         void LateUpdate() {

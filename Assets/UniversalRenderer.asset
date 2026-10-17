@@ -98,5 +98,6 @@ MonoBehaviour:
   receiverRenderingLayers:
     serializedVersion: 0
     m_Bits: 1
+  shadowColor: {r: 0.03137255, g: 0.043137256, b: 0.08235294, a: 1}
   maxShadowCount: 4
   decalMapSize: 512

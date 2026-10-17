@@ -2,6 +2,7 @@
 // FakeShadowPassFeatureがDrawingSettings.overrideMaterialとして全Characterを1つのMaterialで描画する
 // Character毎のデータはRenderer User Value (Mesh/SkinnedMeshRenderer.SetShaderUserValue) のインデックスでグローバル配列から引く
 // Material毎の値を持たないのでSRP Batcherで1つのバッチにまとまる
+// Decal Map (R8) には影の被覆率のみを書き込む
 Shader "UTJ/FakeShadowCaster"
 {
     Properties
@@ -34,13 +35,9 @@ Shader "UTJ/FakeShadowCaster"
 
             #define FAKE_SHADOW_LIMIT 25 // FakeShadowManager.SHADOW_LIMIT
 
-CBUFFER_START(UnityPerMaterial)
-CBUFFER_END
-
             // Global properties
             float _FakeShadowLine;
-            half4 _FakeShadowColor;
-            int _FakeShadowUserValueShift;                   // User Valueの何bit目から8bitを使うか
+            int _FakeShadowUserValueShift;                  // User Valueの何bit目から8bitを使うか
             float4x4 _FakeShadowMatrices[FAKE_SHADOW_LIMIT]; // Projection * View
             float4 _FakeShadowOffsets[FAKE_SHADOW_LIMIT];    // xy: グリッド位置, z: Clip有効
             float4 _FakeShadowClipRects[FAKE_SHADOW_LIMIT];
@@ -94,7 +91,8 @@ CBUFFER_END
                     clip(step(rect.x, input.screenPos.x) * step(input.screenPos.x, rect.x + rect.z) *
                         step(rect.y, input.screenPos.y) * step(input.screenPos.y, rect.y + rect.w) - 0.001);
                 }
-                return _FakeShadowColor;
+                // Decal Map(R8)には被覆率のみを書く、色はFakeShadowByDecalで_FakeShadowColorから取る
+                return 1;
             }
             ENDHLSL
         }

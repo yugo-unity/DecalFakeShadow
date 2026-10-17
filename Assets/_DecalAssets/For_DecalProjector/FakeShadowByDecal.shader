@@ -59,9 +59,12 @@ Shader "UTJ/FakeShadowByDecal"
         float4 _Base_Color;
         CBUFFER_END
 
-        // FakeShadowPassFeatureがグローバルに設定するDecal Map
+        // FakeShadowPassFeatureがグローバルに設定する
+        // Decal Map (R8) は影の被覆率のみで、色は全Shadow共通の_FakeShadowColorを使う
+        // (色をDecal Mapに持たせるとクリア色とのBilinear補間でエッジに暗い縁が出る)
         TEXTURE2D(_DecalTexture);
         SAMPLER(sampler_DecalTexture);
+        half4 _FakeShadowColor;
 
         // --------------------------------------------------
         // Functions
@@ -74,8 +77,8 @@ Shader "UTJ/FakeShadowByDecal"
             float2 scale = float2(normalToWorld[3][0], normalToWorld[3][1]);
             float2 offset = float2(normalToWorld[3][2], normalToWorld[3][3]);
 
-            float4 color = SAMPLE_TEXTURE2D(_DecalTexture, sampler_DecalTexture, texCoord * scale + offset);
-            return half4(color.rgb * _Base_Color.rgb, color.a * fadeFactor);
+            half coverage = SAMPLE_TEXTURE2D(_DecalTexture, sampler_DecalTexture, texCoord * scale + offset).r;
+            return half4(_FakeShadowColor.rgb * _Base_Color.rgb, coverage * _FakeShadowColor.a * fadeFactor);
         }
 
         // --------------------------------------------------
