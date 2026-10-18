@@ -96,7 +96,7 @@ Fake Shadow は Blob Shadow と同じく、真上から落とす（Top-Down）�
   - ビットを持つが、どの FakeShadow からも参照されていない Renderer。
   - ビットを持つが、影が割り当てられていない FakeShadow の Renderer。
   - Shadow Mesh を指定した FakeShadow の元の Renderer にビットがある場合。
-  - マスクにこのビットを含むライト（Rendering Layers と Custom Shadow Layers）と、FakeShadow 以外の Decal Projector。影が割り当てられている間だけ、キャラクターにそのライトが当たる・Decal が投影されるので、見た目が切り替わります。定義済みのすべてのビットを含むマスク（Everything）は問題にならないので除外します。
+  - マスクにこのビットを含むライト（Rendering Layers と Custom Shadow Layers）と、FakeShadow 以外の Decal Projector。影が割り当てられている間だけ、キャラクターにそのライトが当たる・Decal が投影されるので、見た目が切り替わります。定義済みのすべてのビットを含むマスク（Everything）は問題にならないので除外します。URP Asset の Lighting の Use Rendering Layers が無効の場合は、ライトのマスクが使われないのでライトは調べません。
 - 検出のみであり自動で修正する機能はありません。
 
 ## カリング

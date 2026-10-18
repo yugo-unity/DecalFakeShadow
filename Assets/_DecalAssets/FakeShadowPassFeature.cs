@@ -533,6 +533,9 @@ namespace UTJ {
             }
 
             var definedMask = GetDefinedRenderingLayerMask();
+            // URP AssetのUse Rendering Layers (Lighting) が無効の場合、ライトのマスクは比較されないので調べない (Inspectorでも編集できない)
+            var pipelineAsset = UniversalRenderPipeline.asset;
+            var checkLights = pipelineAsset != null && pipelineAsset.useRenderingLayers;
             var count = 0;
             foreach (var root in roots) {
                 foreach (var renderer in root.GetComponentsInChildren<Renderer>(true)) {
@@ -550,16 +553,18 @@ namespace UTJ {
                     Debug.LogWarning($"FakeShadow Verify: Renderer [{GetPath(renderer)}] has \"Shadow Caster Rendering Layer\" but {reason}.", renderer);
                     ++count;
                 }
-                foreach (var light in root.GetComponentsInChildren<Light>(true)) {
-                    var lightLayers = (uint)light.renderingLayerMask;
-                    var shadowLayers = lightLayers;
-                    if (light.TryGetComponent<UniversalAdditionalLightData>(out var data)) {
-                        lightLayers = data.renderingLayers.value;
-                        shadowLayers = data.customShadowLayers ? data.shadowRenderingLayers.value : lightLayers;
-                    }
-                    if (IncludesCasterLayer(lightLayers, mask, definedMask) || IncludesCasterLayer(shadowLayers, mask, definedMask)) {
-                        Debug.LogWarning($"FakeShadow Verify: Light [{GetPath(light)}] includes \"Shadow Caster Rendering Layer\". Characters are lit or shadowed by it only while their fake shadows are assigned.", light);
-                        ++count;
+                if (checkLights) {
+                    foreach (var light in root.GetComponentsInChildren<Light>(true)) {
+                        var lightLayers = (uint)light.renderingLayerMask;
+                        var shadowLayers = lightLayers;
+                        if (light.TryGetComponent<UniversalAdditionalLightData>(out var data)) {
+                            lightLayers = data.renderingLayers.value;
+                            shadowLayers = data.customShadowLayers ? data.shadowRenderingLayers.value : lightLayers;
+                        }
+                        if (IncludesCasterLayer(lightLayers, mask, definedMask) || IncludesCasterLayer(shadowLayers, mask, definedMask)) {
+                            Debug.LogWarning($"FakeShadow Verify: Light [{GetPath(light)}] includes \"Shadow Caster Rendering Layer\". Characters are lit or shadowed by it only while their fake shadows are assigned.", light);
+                            ++count;
+                        }
                     }
                 }
                 foreach (var projector in root.GetComponentsInChildren<DecalProjector>(true)) {
