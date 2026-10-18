@@ -4,7 +4,9 @@
 #endif
 
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using Unity.Collections;
+using Unity.Collections.LowLevel.Unsafe;
 using UnityEngine;
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.RenderGraphModule;
@@ -48,6 +50,19 @@ namespace UTJ {
             public RenderingLayerMask receiverRenderingLayers; // Decal ProjectorのRendering Layer Mask
         }
 
+        /// <summary>
+        /// FakeShadowData (FakeShadowCaster.shaderの定数バッファ) のレイアウト、Shader側の宣言と順序を合わせる
+        /// NOTE: 末尾の4値はcbufferのパッキングで行列の後の1つのfloat4に収まる
+        /// </summary>
+        [StructLayout(LayoutKind.Sequential)]
+        public unsafe struct ShadowData {
+            public fixed float matrices[SHADOW_DATA_COUNT * 16]; // float4x4[SHADOW_DATA_COUNT] (Projection * View)
+            public float line;           // グリッドの分割数 (1辺)
+            public float mapTexel;       // 1 / Decal Mapの解像度
+            public uint clipMask;        // Grid Clipping有効フラグ (bit i: インデックスiの影)
+            public int userValueShift;   // User Valueの何bit目から5bitを使うか
+        }
+
         // 同時に有効な影の上限 (Inspectorで設定できる最大数)
         // NOTE: 仕組み上の限界は31 (User Value 5bitの0は未割当、FakeShadowDataの末尾は番兵、Grid Clippingのビットマスクは32bit)
         //       25は5x5のグリッド、26以上は6x6になり影1つあたりの解像度が下がる
@@ -57,10 +72,8 @@ namespace UTJ {
         // FakeShadowData (FakeShadowCaster.shaderの定数バッファ) の要素数、FAKE_SHADOW_DATA_COUNTと合わせる
         // User Valueの5bitで引ける数で、末尾(31)はUser Value 0 (未割当) が引く番兵
         public const int SHADOW_DATA_COUNT = (int)USER_VALUE_MASK + 1;
-        // FakeShadowDataのレイアウト: float4x4[SHADOW_DATA_COUNT] + (line, mapTexel, clipMask, userValueShift)
         public const int SHADOW_DATA_STRIDE = 16; // float4単位
-        public const int SHADOW_DATA_SIZE = SHADOW_DATA_COUNT * 64 + 16;
-        public const int SHADOW_DATA_PARAMS_OFFSET = SHADOW_DATA_COUNT * 16; // uint単位
+        public static readonly int SHADOW_DATA_SIZE = UnsafeUtility.SizeOf<ShadowData>();
         public static readonly int PROP_ID_SHADOW_DATA = Shader.PropertyToID("FakeShadowData");
         public static readonly int PROP_ID_COLOR = Shader.PropertyToID("_FakeShadowColor");
         public static readonly Quaternion TOP_ROT = Quaternion.Euler(90f, 0f, 0f);
@@ -373,14 +386,15 @@ namespace UTJ {
         /// <summary>
         /// FakeShadowData (FakeShadowCaster.shaderの定数バッファ) の内容を書き込む
         /// </summary>
-        /// <param name="matrices">行列 (SHADOW_DATA_COUNT個)</param>
-        /// <param name="parameters">line, mapTexel, clipMask, userValueShift (bit列をそのまま書くのでuint)</param>
-        internal static void WriteShadowData(NativeArray<Matrix4x4> matrices, NativeArray<uint> parameters) {
-            matrices.CopyFrom(s_Matrices);
-            parameters[0] = (uint)System.BitConverter.SingleToInt32Bits(s_Line);
-            parameters[1] = (uint)System.BitConverter.SingleToInt32Bits(1f / mapSize);
-            parameters[2] = s_ClipMask;
-            parameters[3] = (uint)userValueShift;
+        /// <param name="buffer">書き込み先 (要素数1)</param>
+        internal static unsafe void WriteShadowData(NativeArray<ShadowData> buffer) {
+            var data = (ShadowData*)buffer.GetUnsafePtr();
+            fixed (Matrix4x4* src = s_Matrices)
+                UnsafeUtility.MemCpy(data->matrices, src, SHADOW_DATA_COUNT * sizeof(Matrix4x4));
+            data->line = s_Line;
+            data->mapTexel = 1f / mapSize;
+            data->clipMask = s_ClipMask;
+            data->userValueShift = userValueShift;
         }
 
         private static Matrix4x4[] CreateClipOutMatrices() {
@@ -524,15 +538,13 @@ namespace UTJ {
                 public RendererListHandle rendererList;
                 public TextureHandle decalMap;
                 public GraphicsBuffer shadowDataBuffer;
-                public NativeArray<uint> shadowData;
+                public NativeArray<FakeShadowManager.ShadowData> shadowData;
                 public Color color;
             }
 
             // FakeShadowCaster.shaderの定数バッファ (FakeShadowData)
             private GraphicsBuffer shadowDataBuffer = null;
-            private NativeArray<uint> shadowData;              // 更新用 (bit列をそのまま書くのでuint)
-            private NativeArray<Matrix4x4> shadowDataMatrices; // shadowDataの行列部分のビュー
-            private NativeArray<uint> shadowDataParams;        // shadowDataのパラメータ部分のビュー
+            private NativeArray<FakeShadowManager.ShadowData> shadowData; // 更新用 (要素数1)
 
             public CharacterShadowPass() {
                 // 他のPassに依存しないので、Main/Additional LightのShadow Map生成と連続させてRender Targetの切り替えを抑える
@@ -542,9 +554,7 @@ namespace UTJ {
 #endif
                 this.shadowDataBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Constant,
                     FakeShadowManager.SHADOW_DATA_SIZE / FakeShadowManager.SHADOW_DATA_STRIDE, FakeShadowManager.SHADOW_DATA_STRIDE);
-                this.shadowData = new NativeArray<uint>(FakeShadowManager.SHADOW_DATA_SIZE / sizeof(uint), Allocator.Persistent);
-                this.shadowDataMatrices = this.shadowData.GetSubArray(0, FakeShadowManager.SHADOW_DATA_PARAMS_OFFSET).Reinterpret<Matrix4x4>(sizeof(uint));
-                this.shadowDataParams = this.shadowData.GetSubArray(FakeShadowManager.SHADOW_DATA_PARAMS_OFFSET, 4);
+                this.shadowData = new NativeArray<FakeShadowManager.ShadowData>(1, Allocator.Persistent);
             }
 
             public void Dispose() {
@@ -569,7 +579,7 @@ namespace UTJ {
                 var decalMapHandle = renderGraph.ImportTexture(this.decalMap);
 
                 // Character毎のデータ (Managerが保持) をFakeShadowDataに書き込む、GraphicsBufferへの転送はPass内で行う
-                FakeShadowManager.WriteShadowData(this.shadowDataMatrices, this.shadowDataParams);
+                FakeShadowManager.WriteShadowData(this.shadowData);
 
                 using (var builder = renderGraph.AddUnsafePass<PassData>(this.passName, out var passData, this.profilingSampler)) {
                     // DecalをGPU Instancingする為にDecal Map一つにグリッドで描画する
