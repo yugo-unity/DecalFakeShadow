@@ -591,7 +591,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 4885301371922852569, guid: c1c632b1b9185bc43aafd480e0799531, type: 3}
       propertyPath: m_RenderingLayerMask
-      value: 2
+      value: 130
       objectReference: {fileID: 0}
     - target: {fileID: 4885301371922852569, guid: c1c632b1b9185bc43aafd480e0799531, type: 3}
       propertyPath: 'm_Materials.Array.data[0]'
@@ -923,7 +923,7 @@ MonoBehaviour:
   m_StartAngleFade: 0
   m_EndAngleFade: 46.8932
   m_UVScale: {x: 0.5, y: 0.5}
-  m_UVBias: {x: 0.5, y: 0.5}
+  m_UVBias: {x: 0.5, y: 0}
   m_RenderingLayerMask:
     serializedVersion: 0
     m_Bits: 1
@@ -1101,7 +1101,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 4885301371922852569, guid: c1c632b1b9185bc43aafd480e0799531, type: 3}
       propertyPath: m_RenderingLayerMask
-      value: 2
+      value: 130
       objectReference: {fileID: 0}
     - target: {fileID: 4885301371922852569, guid: c1c632b1b9185bc43aafd480e0799531, type: 3}
       propertyPath: 'm_Materials.Array.data[0]'
@@ -1193,7 +1193,7 @@ MonoBehaviour:
   m_StartAngleFade: 180
   m_EndAngleFade: 180
   m_UVScale: {x: 0.5, y: 0.5}
-  m_UVBias: {x: 0.5, y: 0}
+  m_UVBias: {x: 0.5, y: 0.5}
   m_RenderingLayerMask:
     serializedVersion: 0
     m_Bits: 1
