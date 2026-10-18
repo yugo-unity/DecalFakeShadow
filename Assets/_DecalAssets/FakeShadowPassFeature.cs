@@ -45,7 +45,7 @@ namespace UTJ {
             public Vector2 uvScale;
             public Vector2 uvBias;
             public Material material;   // Shadow Mesh用の共通Material
-            public int shadowCasterLayer; // Shadow Mesh用の内部RendererのLayer
+            public uint shadowCasterMask; // Shadow Caster Rendering Layerのビット (Decal Mapに描画するRendererに付ける)
             public int userValueShift;
             public RenderingLayerMask receiverRenderingLayers; // Decal ProjectorのRendering Layer Mask
         }
@@ -103,7 +103,7 @@ namespace UTJ {
         private static int availableCount = 0; // 0は未設定 (次のSetAvailableCountで全Shadowを再設定する)
         private static float mapSize = 1f;
         private static int userValueShift = 0;
-        private static int shadowCasterLayer = 0; // Shadow Caster Layerの最下位ビットのLayer
+        private static int shadowCasterRenderingLayer = -1; // Shadow Caster Rendering Layerのビット番号 (-1は未設定)
         private static RenderingLayerMask receiverRenderingLayers = 1u; // Default
         #endregion
 
@@ -267,18 +267,34 @@ namespace UTJ {
         }
 
         /// <summary>
-        /// Shadow Caster Layerの設定 (Shadow Mesh用の内部Rendererは最下位ビットのLayerに置く)
+        /// Shadow Caster Rendering Layerの設定
+        /// 稼働中の影のDecal Mapに描画するRendererにだけこのビットを付け、Passはこのビットで描画対象を絞る
         /// </summary>
-        /// <param name="mask">Shadow Caster Layer (0以外)</param>
-        internal static void SetShadowCasterLayer(LayerMask mask) {
-            var layer = 0;
-            while (layer < 31 && (mask.value & (1 << layer)) == 0)
-                ++layer;
-            if (shadowCasterLayer == layer)
+        /// <param name="layer">ビット番号 (-1は未設定)</param>
+        internal static void SetShadowCasterRenderingLayer(int layer) {
+            if (shadowCasterRenderingLayer == layer)
                 return;
 
-            shadowCasterLayer = layer;
-            availableCount = 0; // 内部RendererのLayerを変更する為、全Shadowを再設定する
+            shadowCasterRenderingLayer = layer;
+            availableCount = 0; // 稼働中の影のビットを付け替える為、全Shadowを再設定する
+        }
+
+        /// <summary>
+        /// Shadow Caster Rendering Layerのビット番号 (未設定は-1)
+        /// </summary>
+        internal static int shadowCasterRenderingLayerIndex { get => shadowCasterRenderingLayer; }
+
+        /// <summary>
+        /// Shadow Caster Rendering Layerのビット (未設定は0)
+        /// </summary>
+        internal static uint shadowCasterMask { get => shadowCasterRenderingLayer >= 0 ? 1u << shadowCasterRenderingLayer : 0u; }
+
+        /// <summary>
+        /// 定義済みのRendering Layerか (削除されたRendering Layerは未設定として扱う)
+        /// </summary>
+        internal static bool IsDefinedRenderingLayer(int layer) {
+            // NOTE: RenderingLayerToNameは定義数以上のビット番号でエラーを出す
+            return layer >= 0 && layer < RenderingLayerMask.GetRenderingLayerCount() && !string.IsNullOrEmpty(RenderingLayerMask.RenderingLayerToName(layer));
         }
 
         /// <summary>
@@ -366,7 +382,7 @@ namespace UTJ {
                 available.Add(req, index);
 
                 matParams[index].material = s_Material;
-                matParams[index].shadowCasterLayer = shadowCasterLayer;
+                matParams[index].shadowCasterMask = shadowCasterMask;
                 matParams[index].userValueShift = userValueShift;
                 matParams[index].receiverRenderingLayers = receiverRenderingLayers;
                 req.Setup(in matParams[index]);
@@ -480,22 +496,146 @@ namespace UTJ {
             return false;
         }
         #endregion
+
+
+#if UNITY_EDITOR
+        #region VERIFY
+        /// <summary>
+        /// Shadow Caster Rendering Layerのビットが意図せず残っているオブジェクトの検出 (FakeShadowPassFeatureのVerifyボタン、Play Mode中も可)
+        /// 対象は読み込み中の全Scene (Play Mode中はDontDestroyOnLoad、Prefab Mode中はPrefabのSceneも含む)、非アクティブも含める
+        /// NOTE: Resources.FindObjectsOfTypeAllはInspectorのプレビュー用の複製も返すので使わない
+        /// </summary>
+        internal static void Verify() {
+            var mask = shadowCasterMask;
+            if (mask == 0u) {
+                Debug.LogWarning("FakeShadow Verify: \"Shadow Caster Rendering Layer\" is not set.");
+                return;
+            }
+
+            var roots = new List<GameObject>();
+            foreach (var scene in GetVerifyScenes())
+                roots.AddRange(scene.GetRootGameObjects());
+
+            // FakeShadowが参照するRendererとDecalProjector
+            var shadows = new List<FakeShadow>();
+            foreach (var root in roots)
+                shadows.AddRange(root.GetComponentsInChildren<FakeShadow>(true));
+            var owners = new Dictionary<Renderer, FakeShadow>();
+            var projectors = new HashSet<DecalProjector>();
+            foreach (var shadow in shadows) {
+                var source = shadow.sourceRenderer;
+                if (source != null)
+                    owners[source] = shadow;
+                if (shadow.internalRenderer != null)
+                    owners[shadow.internalRenderer] = shadow;
+                if (shadow.projector != null)
+                    projectors.Add(shadow.projector);
+            }
+
+            var definedMask = GetDefinedRenderingLayerMask();
+            var count = 0;
+            foreach (var root in roots) {
+                foreach (var renderer in root.GetComponentsInChildren<Renderer>(true)) {
+                    if ((renderer.renderingLayerMask & mask) == 0u)
+                        continue;
+                    string reason = null;
+                    if (!owners.TryGetValue(renderer, out var shadow))
+                        reason = "not referenced by any FakeShadow";
+                    else if (shadow.isShadowMesh && renderer == shadow.sourceRenderer)
+                        reason = "source renderer of a FakeShadow with Shadow Mesh (the internal renderer draws the shadow)";
+                    else if (!shadow.isAvailable)
+                        reason = "the FakeShadow has no assigned shadow";
+                    if (reason == null)
+                        continue;
+                    Debug.LogWarning($"FakeShadow Verify: Renderer [{GetPath(renderer)}] has \"Shadow Caster Rendering Layer\" but {reason}.", renderer);
+                    ++count;
+                }
+                foreach (var light in root.GetComponentsInChildren<Light>(true)) {
+                    var lightLayers = (uint)light.renderingLayerMask;
+                    var shadowLayers = lightLayers;
+                    if (light.TryGetComponent<UniversalAdditionalLightData>(out var data)) {
+                        lightLayers = data.renderingLayers.value;
+                        shadowLayers = data.customShadowLayers ? data.shadowRenderingLayers.value : lightLayers;
+                    }
+                    if (IncludesCasterLayer(lightLayers, mask, definedMask) || IncludesCasterLayer(shadowLayers, mask, definedMask)) {
+                        Debug.LogWarning($"FakeShadow Verify: Light [{GetPath(light)}] includes \"Shadow Caster Rendering Layer\". Characters are lit or shadowed by it only while their fake shadows are assigned.", light);
+                        ++count;
+                    }
+                }
+                foreach (var projector in root.GetComponentsInChildren<DecalProjector>(true)) {
+                    if (projectors.Contains(projector) || !IncludesCasterLayer(projector.renderingLayerMask, mask, definedMask))
+                        continue;
+                    Debug.LogWarning($"FakeShadow Verify: DecalProjector [{GetPath(projector)}] includes \"Shadow Caster Rendering Layer\". It projects onto characters only while their fake shadows are assigned.", projector);
+                    ++count;
+                }
+            }
+
+            if (count == 0)
+                Debug.Log("FakeShadow Verify: no problems found.");
+            else
+                Debug.LogWarning($"FakeShadow Verify: {count} problem(s) found.");
+        }
+
+        private static List<UnityEngine.SceneManagement.Scene> GetVerifyScenes() {
+            var scenes = new List<UnityEngine.SceneManagement.Scene>();
+            for (var i = 0; i < UnityEngine.SceneManagement.SceneManager.sceneCount; ++i) {
+                var scene = UnityEngine.SceneManagement.SceneManager.GetSceneAt(i);
+                if (scene.isLoaded)
+                    scenes.Add(scene);
+            }
+            var stage = UnityEditor.SceneManagement.PrefabStageUtility.GetCurrentPrefabStage();
+            if (stage != null && stage.scene.IsValid())
+                scenes.Add(stage.scene);
+            if (Application.isPlaying) {
+                // DontDestroyOnLoadのSceneは直接取得できないので、一時的なGameObjectを移して取得する
+                var probe = new GameObject("FakeShadowVerifyProbe");
+                Object.DontDestroyOnLoad(probe);
+                scenes.Add(probe.scene);
+                Object.DestroyImmediate(probe);
+            }
+            return scenes;
+        }
+
+        private static uint GetDefinedRenderingLayerMask() {
+            var mask = 0u;
+            for (var i = 0; i < 32; ++i) {
+                if (IsDefinedRenderingLayer(i))
+                    mask |= 1u << i;
+            }
+            return mask;
+        }
+
+        /// <summary>
+        /// Shadow Caster Rendering Layerのビットを含むか (定義済みの全ビットを含むマスク (Everything) はキャラクター自身のビットも含むので問題ない)
+        /// </summary>
+        private static bool IncludesCasterLayer(uint layers, uint casterMask, uint definedMask) {
+            return (layers & casterMask) != 0u && (layers & definedMask) != definedMask;
+        }
+
+        private static string GetPath(Component component) {
+            var path = component.name;
+            for (var t = component.transform.parent; t != null; t = t.parent)
+                path = $"{t.name}/{path}";
+            return $"{component.gameObject.scene.name}: {path}";
+        }
+        #endregion
+#endif
     }
     #endregion
 
     /// <summary>
-    /// DecalRendererFeatureの"Use Rendering Layers"の有効を必須とする（無効時は警告を出し、稼働中の影をキャンセルして無効になる）
-    ///   - CharacterはRenderer標準のPrepass/Opaque Passで描画する（Opaque/Prepass Layer MaskにShadow Caster Layerを含めること）
+    /// DecalRendererFeatureの"Use Rendering Layers"の有効を必須とする（無効時は警告を出し、稼働中の影を一時停止して無効になる）
+    ///   - Decal Mapには、稼働中の影のRendererだけを描画する（FakeShadowが割当中だけShadow Caster Rendering Layerのビットを付け、Passはこのビットで絞る）
     ///   - Characterの Rendering Layer Mask を Receiver Rendering Layers から外し、Decal LayersでDecal Shadowから除外する
     /// Decal RendererFeatureのTechnique(Screen Space / DBuffer)は手動で切り替える（ランタイムでの切替は非対応、Editor上での切替は可）
     /// </summary>
     public class FakeShadowPassFeature : ScriptableRendererFeature {
-        [Tooltip("Layers that cast fake shadows.")]
-        public LayerMask shadowCasterLayer = 0;
         [Tooltip("Shader that draws casters into the decal map (UTJ/FakeShadowCaster).")]
         public Shader fakeShadowShader = null;
         [Range(0, FakeShadowManager.USER_VALUE_SHIFT_MAX), Tooltip("Start bit of the 5 bits FakeShadow uses in the renderer's User Value.")]
         public int userValueShift = 0;
+        [RenderingLayerIndex, Tooltip("Rendering layer FakeShadow sets on renderers with an active shadow. Only these are drawn into the decal map.")]
+        public int shadowCasterRenderingLayer = -1;
         [Tooltip("Rendering layers that receive fake shadows.")]
         public RenderingLayerMask receiverRenderingLayers = 1u; // Default
         [Tooltip("Shadow color, multiplied by the Base Color of the DecalProjector's material. Alpha sets the opacity.")]
@@ -510,13 +650,13 @@ namespace UTJ {
 
         #region FAKE SHADOW PASS
         /// <summary>
-        /// CharacterレイヤーのFake Shadow pass
+        /// Shadow Caster Rendering LayerのRenderer (稼働中の影) をDecal Mapに描画するFake Shadow pass
         /// NOTE: FakeShadowData (GraphicsBuffer) の更新をPass内のコマンドで行う為Unsafe Passにする
         ///       (RasterCommandBufferにはSetBufferDataが無い)
         ///       前後のPass (Shadow Map / カメラ解像度のPrepass) とはRender Targetのサイズが異なり、Native Render Passのマージ対象にならない
         /// </summary>
         class CharacterShadowPass : ScriptableRenderPass {
-            public LayerMask layerMask = 0;
+            public uint renderingLayerMask = 0u; // Shadow Caster Rendering Layerのビット
             public int decalMapSize = 512;
             public Material overrideMaterial = null;
 
@@ -588,7 +728,8 @@ namespace UTJ {
                     drawSettings.overrideMaterial = this.overrideMaterial;
                     drawSettings.overrideMaterialPassIndex = 0;
                     drawSettings.perObjectData = PerObjectData.None;
-                    var filteringSettings = new FilteringSettings(RenderQueueRange.opaque, this.layerMask);
+                    // GameObjectのLayerは問わず、Shadow Caster Rendering Layerのビット (FakeShadowが割当中だけ付ける) で絞る
+                    var filteringSettings = new FilteringSettings(RenderQueueRange.opaque, -1, this.renderingLayerMask);
                     passData.rendererList = renderGraph.CreateRendererList(new RendererListParams(renderingData.cullResults, drawSettings, filteringSettings));
                     passData.decalMap = decalMapHandle;
                     passData.shadowDataBuffer = this.shadowDataBuffer;
@@ -633,17 +774,17 @@ namespace UTJ {
             NOT_OWNER = 1 << 3,
             NO_DECAL_LAYERS = 1 << 4,
             NO_CASTER_LAYER = 1 << 5,
+            CASTER_IN_RECEIVER = 1 << 6,
         }
         private WARNING warned = WARNING.NONE;
 #if UNITY_EDITOR
-        private bool maskWarned = false;
 
         // Edit Modeの再描画要求
         // 設定の判定はAddRenderPasses、反映は次の描画のOnBeginContextRenderingで行うので、反映には描画が2回要る
         // Edit ModeはViewの再描画が変更時にしか走らないので、判定が反映済みの状態と違う場合は再描画を1回予約する
         private enum APPLIED {
             NONE,       // 未判定（DecalRendererFeatureが無い場合を含む）
-            SUSPENDED,  // 一時停止（非対応のTechnique、Use Rendering Layers無効、Shadow Caster Layer未設定）
+            SUSPENDED,  // 一時停止（非対応のTechnique、Use Rendering Layers無効、Shadow Caster Rendering Layer未設定）
             ACTIVE,     // 稼働
         }
         private APPLIED applied = APPLIED.NONE;
@@ -711,23 +852,23 @@ namespace UTJ {
             return true;
         }
 
+        /// <summary>
+        /// Shadow Caster Rendering Layerのビット番号 (未定義・未設定は-1)
+        /// 複数のFeatureが稼働している場合は先頭のFeatureの設定 (Managerが保持) を使用する
+        /// </summary>
+        private int GetShadowCasterRenderingLayer() {
+            var layer = FakeShadowManager.IsOwner(this) ? this.shadowCasterRenderingLayer : FakeShadowManager.shadowCasterRenderingLayerIndex;
+            return FakeShadowManager.IsDefinedRenderingLayer(layer) ? layer : -1;
+        }
+
 #if UNITY_EDITOR
         /// <summary>
-        /// Opaque/Prepass Layer MaskにShadow Caster Layerが含まれていない場合の警告
+        /// Shadow Caster Rendering Layerのビットが意図せず残っているオブジェクトの検出 (InspectorのVerifyボタン)
         /// </summary>
-        private void ValidateLayerMask(ScriptableRenderer renderer) {
-            if (!(renderer is UniversalRenderer universalRenderer))
-                return;
-            var casterMask = this.shadowCasterLayer.value;
-            var opaqueMask = universalRenderer.opaqueLayerMask.value;
-            // NOTE: prepassLayerMaskはCompatibility ModeではOpaque Layer Maskになる、実際にPrepassで使われる値を参照する
-            var prepassMask = universalRenderer.prepassLayerMask.value;
-            var missing = (opaqueMask & casterMask) != casterMask || (prepassMask & casterMask) != casterMask;
-            if (missing != this.maskWarned) {
-                this.maskWarned = missing;
-                if (missing)
-                    Debug.LogWarning($"FakeShadowPassFeature: include Shadow Caster Layer in \"Opaque Layer Mask\" and \"Prepass Layer Mask\" of the renderer. (Opaque Layer Mask: 0x{opaqueMask:X}, Prepass Layer Mask: 0x{prepassMask:X})");
-            }
+        internal void Verify() {
+            if (!FakeShadowManager.IsOwner(this))
+                Debug.LogWarning("FakeShadow Verify: this FakeShadowPassFeature is not active or not the first one. The settings of the first active one are used.");
+            FakeShadowManager.Verify();
         }
 #endif
 
@@ -735,7 +876,8 @@ namespace UTJ {
         /// Rendering Layerの書き出しタイミングの申告 (URP内部API、URPRuntime.asmrefでURPのアセンブリに含めて上書きする)
         /// 既定実装はRendering Layerを使わない場合もDepthNormalPrePassを申告し、全Featureの申告の早い方が採用されるので
         /// Screen Space Decal (Opaqueで書き出し) でもDepthNormals Prepassが発生してしまう
-        /// FakeShadowPassFeature自体はRendering Layerを使わないので、Opaqueを申告して他のFeatureの要求を妨げない
+        /// FakeShadowPassFeatureはRendering LayerをRendererの絞り込み (CPU側) にしか使わず、Rendering Layerのテクスチャは不要なので、
+        /// Opaqueを申告して他のFeatureの要求を妨げない
         /// </summary>
         internal override bool RequireRenderingLayers(bool isDeferred, bool needsGBufferAccurateNormals, out RenderingLayerUtils.Event atEvent, out RenderingLayerUtils.MaskSize maskSize) {
             atEvent = RenderingLayerUtils.Event.Opaque;
@@ -768,7 +910,6 @@ namespace UTJ {
             this.cachedDecalLayers = false;
             this.warned = WARNING.NONE;
 #if UNITY_EDITOR
-            this.maskWarned = false;
             this.applied = APPLIED.NONE;
             this.repaintRequested = false;
 #endif
@@ -784,6 +925,8 @@ namespace UTJ {
                 return;
             FakeShadowManager.SetShader(this.fakeShadowShader);
             FakeShadowManager.SetDefaultColor(this.shadowColor);
+            // 未設定・未定義は-1 (IsSupportedで一時停止する)、変更時は全Shadowを再設定するのでSetAvailableCountより先に行う
+            FakeShadowManager.SetShadowCasterRenderingLayer(this.GetShadowCasterRenderingLayer());
 
 #if UNITY_EDITOR
             this.repaintRequested = false;
@@ -795,13 +938,12 @@ namespace UTJ {
             // 非対応のTechnique、またはUse Rendering Layers無効の場合は稼働中の影を一時停止する（設定が戻ると自動で復帰する）
             // NOTE: 停止しただけではDecalProjectorと前回のDecal Mapが残り、止まった影が描画され続ける
             //       DBufferではAddRenderPassesでDrawCall Jobが発行されるので、検出したAddRenderPassesではなく次の描画前に行う
-            // Shadow Caster Layerが未設定の場合も同様（Shadow Mesh用の内部RendererのLayerを決められない）
+            // Shadow Caster Rendering Layerが未設定の場合も同様（Decal Mapに描画するRendererを選べない）
             if (!this.IsSupported(this.cachedTechnique)) {
                 FakeShadowManager.SuspendAll();
                 return;
             }
 
-            FakeShadowManager.SetShadowCasterLayer(this.shadowCasterLayer); // 変更時は全Shadowを再設定するのでSetAvailableCountより先に行う
             FakeShadowManager.SetAvailableCount(this.maxShadowCount, this.decalMapSize); // 有効数の変更、ランタイムで変更したい場合は要改変、実行数より有効数を減らされた場合の例外対応に注意
             FakeShadowManager.SetUserValueShift(this.userValueShift);
             FakeShadowManager.SetReceiverRenderingLayers(this.receiverRenderingLayers);
@@ -817,7 +959,7 @@ namespace UTJ {
         /// FakeShadowを稼働できる設定か (Technique判定済みの場合)
         /// </summary>
         private bool IsSupported(DecalTechnique technique) {
-            return technique != DecalTechnique.GBuffer && this.cachedDecalLayers && this.shadowCasterLayer.value != 0;
+            return technique != DecalTechnique.GBuffer && this.cachedDecalLayers && this.GetShadowCasterRenderingLayer() >= 0;
         }
 
 #if UNITY_EDITOR
@@ -840,16 +982,19 @@ namespace UTJ {
             // CharacterはDecal LayersでDecal Shadowから除外する
             if (this.UpdateWarning(WARNING.NO_DECAL_LAYERS, !this.cachedDecalLayers, "FakeShadowPassFeature requires \"Use Rendering Layers\" of the Decal Renderer Feature. FakeShadow is disabled."))
                 return;
-            if (this.UpdateWarning(WARNING.NO_CASTER_LAYER, this.shadowCasterLayer.value == 0, "FakeShadowPassFeature: \"Shadow Caster Layer\" is not set. FakeShadow is disabled."))
+            var casterLayer = this.GetShadowCasterRenderingLayer();
+            if (this.UpdateWarning(WARNING.NO_CASTER_LAYER, casterLayer < 0, "FakeShadowPassFeature: \"Shadow Caster Rendering Layer\" is not set. FakeShadow is disabled."))
                 return;
-#if UNITY_EDITOR
-            this.ValidateLayerMask(renderer);
-#endif
             // 描画は行うが、Max Shadow Count等の設定は先頭のFeatureのものが使われる
-            this.UpdateWarning(WARNING.NOT_OWNER, !FakeShadowManager.IsOwner(this), "FakeShadowPassFeature: multiple FakeShadowPassFeatures are active. The settings of the first one are used.");
+            var isOwner = FakeShadowManager.IsOwner(this);
+            this.UpdateWarning(WARNING.NOT_OWNER, !isOwner, "FakeShadowPassFeature: multiple FakeShadowPassFeatures are active. The settings of the first one are used.");
+            // 重なると稼働中の影のCharacterに自身の影が落ちる (動作は継続する)
+            var casterMask = 1u << casterLayer;
+            this.UpdateWarning(WARNING.CASTER_IN_RECEIVER, isOwner && (this.receiverRenderingLayers.value & casterMask) != 0u,
+                "FakeShadowPassFeature: \"Receiver Rendering Layers\" includes \"Shadow Caster Rendering Layer\". Characters receive their own fake shadows.");
 
             // support to modify in runtime
-            this.shadowPass.layerMask = this.shadowCasterLayer;
+            this.shadowPass.renderingLayerMask = casterMask;
             this.shadowPass.decalMapSize = this.decalMapSize;
             this.shadowPass.overrideMaterial = FakeShadowManager.material;
             // Materialを差し替えずに描画するとCharacterそのものがDecal Mapに描かれる

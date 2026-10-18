@@ -8,9 +8,12 @@ namespace UTJ {
     /// <summary>
     /// DecalProjectorを利用したトップビューの疑似影
     /// RendererのUser Valueに割当インデックスを書き込み、FakeShadowPassFeatureが共通Materialで描画する
+    /// 割当中だけRendererのRendering LayerにShadow Caster Rendering Layerのビットを付ける（FakeShadowPassFeatureはこのビットで描画対象を絞る）
     /// Edit ModeでもScene View/Game Viewに描画する
+    /// NOTE: ビットはシーン・Prefabの保存時に戻さない。付いたまま保存されたビットはStopで外れる（起動されないFakeShadowはFakeShadowPassFeatureのVerifyで検出する）
     /// </summary>
     [RequireComponent(typeof(Renderer))]
+    [DisallowMultipleComponent] // User ValueとShadow Caster Rendering Layerのビットを共有するので1つのGameObjectに1つ
     [ExecuteAlways]
     public class FakeShadow : MonoBehaviour {
         [Tooltip("DecalProjector that draws this shadow.")]
@@ -41,13 +44,28 @@ namespace UTJ {
         private Matrix4x4 view = Matrix4x4.identity;
         private int shadowIndex = -1;
         private int userValueShift = -1; // 書き込み済みのUser Valueのbit位置
-        // Shadow Mesh描画用の非表示のSkinnedMeshRenderer (HideAndDontSave、Hierarchyのルートに置く)
         // NOTE: Domain Reload時のホットリロードではprivateフィールドもシリアライズされるので対象外にする
         [System.NonSerialized]
+        private uint casterMask = 0u; // 描画用のRendererに付けたShadow Caster Rendering Layerのビット
+        // Shadow Mesh描画用の非表示のSkinnedMeshRenderer (HideAndDontSave、Hierarchyのルートに置く)
+        [System.NonSerialized]
         private SkinnedMeshRenderer shadowRenderer = null;
+#if UNITY_EDITOR
+        [System.NonSerialized]
+        private bool? appliedActiveOnEnable = null; // Edit ModeでのActive On Enableの切替の検出用
+#endif
 
         internal bool isShadowMesh { get => this.shadowMesh != null; }
         internal bool isRequested { get => this.state.HasFlag(STATE.REQUEST); }
+        internal bool isAvailable { get => this.state.HasFlag(STATE.AVAILABLE); }
+        /// <summary>
+        /// FakeShadowを付けたRenderer (Wakeup前も取得できる)
+        /// </summary>
+        internal Renderer sourceRenderer { get => this.renderer != null ? this.renderer : this.GetComponent<Renderer>(); }
+        /// <summary>
+        /// Shadow Mesh描画用の内部Renderer (未生成はnull)
+        /// </summary>
+        internal Renderer internalRenderer { get => this.shadowRenderer; }
         public bool gridClipping {
             get => this._gridClipping;
             set {
@@ -60,12 +78,42 @@ namespace UTJ {
         }
 
         void OnEnable() {
+#if UNITY_EDITOR
+            this.appliedActiveOnEnable = this.activeOnEnable;
+#endif
             if (this.activeOnEnable)
                 this.Wakeup();
         }
         void OnDisable() {
             this.Sleep();
         }
+
+#if UNITY_EDITOR
+        /// <summary>
+        /// Edit ModeではActive On Enableの切替をその場で反映する（無効にしたら停止してビットを外し、保存に残さない）
+        /// Play ModeではOnEnableの時だけ参照する
+        /// </summary>
+        void OnValidate() {
+            // OnEnable前 (ロード中) は何もしない
+            if (Application.isPlaying || !this.isActiveAndEnabled || !this.appliedActiveOnEnable.HasValue || this.appliedActiveOnEnable.Value == this.activeOnEnable)
+                return;
+            this.appliedActiveOnEnable = this.activeOnEnable;
+            // OnValidateの中では内部RendererのDestroy等ができないので後で行う
+            // NOTE: delayCallはEditorが非フォーカスの間は実行されないことがあるので、updateで1回だけ行う
+            UnityEditor.EditorApplication.update -= this.ApplyActiveOnEnable;
+            UnityEditor.EditorApplication.update += this.ApplyActiveOnEnable;
+        }
+
+        private void ApplyActiveOnEnable() {
+            UnityEditor.EditorApplication.update -= this.ApplyActiveOnEnable;
+            if (this == null || Application.isPlaying || !this.isActiveAndEnabled)
+                return;
+            if (!this.activeOnEnable)
+                this.Sleep();
+            else if (!this.isRequested)
+                this.Wakeup();
+        }
+#endif
 
         /// <summary>
         /// 起動
@@ -125,6 +173,7 @@ namespace UTJ {
                 ClearDecalEntity(this.projector);
             }
             this.ClearUserValue();
+            this.ClearCasterMask();
             this.ReleaseShadowRenderer();
         }
 
@@ -181,6 +230,7 @@ namespace UTJ {
 
             this.shadowIndex = param.index;
             this.ApplyUserValue(param.userValueShift);
+            this.ApplyCasterMask(param.shadowCasterMask);
             FakeShadowManager.SetShadowMatrix(this.shadowIndex, this.projection * this.view);
             FakeShadowManager.SetShadowClip(this.shadowIndex, this.gridClipping);
 
@@ -253,6 +303,46 @@ namespace UTJ {
         }
 
         /// <summary>
+        /// 描画用のRendererにShadow Caster Rendering Layerのビットを付ける（何度呼んでも同じ結果になる）
+        /// 付けたビットが変わった場合は古いビットを外す。Shadow Mesh指定時は内部のRendererにだけ付け、元のRendererからは外す
+        /// </summary>
+        private void ApplyCasterMask(uint mask) {
+            var source = this.sourceRenderer;
+            var removing = this.casterMask | mask;
+            if (this.shadowRenderer != null) {
+                // 内部のRendererはDecal Mapへの描画専用なので、このビットだけを持つ（ライト・他のDecalの影響を受けない）
+                if (this.shadowRenderer.renderingLayerMask != mask)
+                    this.shadowRenderer.renderingLayerMask = mask;
+                RemoveRenderingLayers(source, removing);
+            } else if (source != null) {
+                var value = (source.renderingLayerMask & ~this.casterMask) | mask;
+                if (source.renderingLayerMask != value)
+                    source.renderingLayerMask = value;
+            }
+            this.casterMask = mask;
+        }
+
+        /// <summary>
+        /// Shadow Caster Rendering Layerのビットを外す
+        /// 付けたビットに加えて現在の設定のビットも外す（シーン・Prefabに保存された、複製された等で付いていたビット）
+        /// </summary>
+        private void ClearCasterMask() {
+            var removing = this.casterMask | FakeShadowManager.shadowCasterMask;
+            this.casterMask = 0u;
+            if (removing == 0u)
+                return;
+            RemoveRenderingLayers(this.sourceRenderer, removing);
+            RemoveRenderingLayers(this.shadowRenderer, removing);
+        }
+
+        private static void RemoveRenderingLayers(Renderer renderer, uint mask) {
+            // Scene破棄時はRendererが先に破棄されている場合がある
+            if (renderer == null || (renderer.renderingLayerMask & mask) == 0u)
+                return;
+            renderer.renderingLayerMask &= ~mask;
+        }
+
+        /// <summary>
         /// Decal Mapに描画するRenderer (Shadow Mesh指定時は内部のRenderer)
         /// </summary>
         private Renderer drawRenderer { get => this.shadowRenderer != null ? this.shadowRenderer : this.renderer; }
@@ -282,6 +372,7 @@ namespace UTJ {
         /// <summary>
         /// Shadow Mesh描画用の内部Rendererの生成・更新
         /// Setupは割当数の変更やShader変更でStopを経ずに何度も呼ばれるので、生成済みならMaterial・Layerのみ更新する
+        /// Rendering Layer (Shadow Caster Rendering Layerのビットのみ) はApplyCasterMaskで設定する
         /// </summary>
         private void SetupShadowRenderer(in FakeShadowManager.MatParam param) {
             var source = (SkinnedMeshRenderer)this.renderer; // ValidateShadowMeshで検証済み
@@ -325,7 +416,8 @@ namespace UTJ {
             for (var i = 0; i < materials.Length; ++i)
                 materials[i] = param.material;
             this.shadowRenderer.sharedMaterials = materials;
-            this.shadowRenderer.gameObject.layer = param.shadowCasterLayer;
+            // カメラのCulling Maskで元のRendererと同じ扱いにする（Decal Mapへの描画対象はRendering Layerで絞る）
+            this.shadowRenderer.gameObject.layer = source.gameObject.layer;
         }
 
         /// <summary>

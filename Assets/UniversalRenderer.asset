@@ -90,11 +90,9 @@ MonoBehaviour:
   m_Name: FakeShadowPassFeature
   m_EditorClassIdentifier: 
   m_Active: 1
-  shadowCasterLayer:
-    serializedVersion: 2
-    m_Bits: 64
   fakeShadowShader: {fileID: 4800000, guid: 45b2d29dd53159e44b9d21ec63d25600, type: 3}
   userValueShift: 0
+  shadowCasterRenderingLayer: 7
   receiverRenderingLayers:
     serializedVersion: 0
     m_Bits: 1
