@@ -1,5 +1,7 @@
 using UnityEngine;
+using UnityEngine.Rendering;
 using UnityEngine.Rendering.Universal;
+using UnityEngine.SceneManagement;
 using System.Runtime.CompilerServices;
 
 namespace UTJ {
@@ -17,10 +19,10 @@ namespace UTJ {
         public bool activeOnEnable = false;
         [Tooltip("The projector does not move (skips view matrix updates).")]
         public bool isStatic = false;
-        [SerializeField, Tooltip("Use this renderer only for the fake shadow (its materials are replaced). Do not change at runtime.")]
-        private bool shadowMesh = false;
+        [SerializeField, Tooltip("Mesh drawn into the decal map instead of this renderer's mesh. Must share this renderer's skeleton.")]
+        private Mesh shadowMesh = null;
         [SerializeField, Tooltip("Clip the shadow to its own cell of the decal map.")]
-        private bool _gridClipping = false;
+        private bool _gridClipping = true;
 
         [System.Flags]
         private enum STATE {
@@ -39,12 +41,12 @@ namespace UTJ {
         private Matrix4x4 view = Matrix4x4.identity;
         private int shadowIndex = -1;
         private int userValueShift = -1; // 書き込み済みのUser Valueのbit位置
-        // Shadow Meshの共通Material割当前のMaterial
-        // NOTE: Domain Reload時のホットリロードではprivateフィールドもシリアライズされ、nullが空配列で復元されるので対象外にする
+        // Shadow Mesh描画用の非表示のSkinnedMeshRenderer (HideAndDontSave、Hierarchyのルートに置く)
+        // NOTE: Domain Reload時のホットリロードではprivateフィールドもシリアライズされるので対象外にする
         [System.NonSerialized]
-        private Material[] originalMaterials = null;
+        private SkinnedMeshRenderer shadowRenderer = null;
 
-        internal bool isShadowMesh { get => this.shadowMesh; }
+        internal bool isShadowMesh { get => this.shadowMesh != null; }
         internal bool isRequested { get => this.state.HasFlag(STATE.REQUEST); }
         public bool gridClipping {
             get => this._gridClipping;
@@ -107,10 +109,12 @@ namespace UTJ {
 
             this.state = 0; // cleared REQUEST/AVAILABLE
             // Scene破棄時はDecalProjectorが先に破棄されている場合がある
-            if (this.projector != null)
+            if (this.projector != null) {
                 this.projector.enabled = false;
+                ClearDecalEntity(this.projector);
+            }
             this.ClearUserValue();
-            this.RestoreMaterials();
+            this.ReleaseShadowRenderer();
         }
 
         void LateUpdate() {
@@ -158,19 +162,11 @@ namespace UTJ {
             this.UpdateProjection(force : true);
             TR_Inverse(this.root, out this.view);
 
-            // Shadow MeshはFake Shadow描画専用なので共通Materialを割り当てる（通常描画のPassを持たない）
-            if (this.shadowMesh) {
-                var materials = this.renderer.sharedMaterials;
-                if (this.originalMaterials == null) {
-                    this.originalMaterials = (Material[])materials.Clone();
-#if UNITY_EDITOR
-                    s_AssignedShadowMeshes.Add(this);
-#endif
-                }
-                for (var i = 0; i < materials.Length; ++i)
-                    materials[i] = param.material;
-                this.renderer.sharedMaterials = materials;
-            }
+            // Shadow Mesh指定時は内部のRendererでDecal Mapに描画する
+            if (this.shadowMesh != null)
+                this.SetupShadowRenderer(in param);
+            else
+                this.ReleaseShadowRenderer();
 
             this.shadowIndex = param.index;
             this.ApplyUserValue(param.userValueShift);
@@ -181,9 +177,25 @@ namespace UTJ {
             this.projector.renderingLayerMask = param.receiverRenderingLayers;
             this.projector.uvScale = param.uvScale;
             this.projector.uvBias = param.uvBias;
+            // FakeShadow以外で無効化された場合も古いハンドルが残っているので消してから有効化する
+            ClearDecalEntity(this.projector);
             this.projector.enabled = true;
 
             this.state |= STATE.AVAILABLE;
+        }
+
+        /// <summary>
+        /// 無効なDecalProjectorに残るURPのDecal管理のハンドルを消す (URP内部API、URPRuntime.asmrefで参照)
+        /// URPのDecal管理 (SharedDecalEntityManager) はRendererの再生成やPlay Mode開始で作り直され、
+        /// その時点で無効なProjectorは登録されずに古い管理のハンドル (index, version) を持ったまま残る
+        /// ハンドルは管理毎に同じ番号から振り直されるので、有効化した時に他のProjectorのハンドルと一致すると
+        /// 登録済みと判定されて描画されない (その状態で無効化すると他のProjectorの登録を消す)
+        /// 既定値 (version 0) はどの管理でも無効と判定されるので、次の有効化で必ず新規に登録される
+        /// NOTE: 登録中 (isActiveAndEnabled) のProjectorのハンドルは消さないこと (登録が残ったまま参照を失う)
+        /// </summary>
+        private static void ClearDecalEntity(DecalProjector projector) {
+            if (!projector.isActiveAndEnabled)
+                projector.decalEntity = default;
         }
 
         /// <summary>
@@ -204,15 +216,17 @@ namespace UTJ {
         }
 
         /// <summary>
-        /// 割当インデックス+1をUser Valueの指定位置の8bitに書き込む（他のbitは保持する）
+        /// 割当インデックス+1をUser Valueの指定位置の5bitに書き込む（他のbitは保持する）
+        /// Shadow Mesh指定時は内部のRendererにのみ書き込み、元のRendererには触れない
         /// </summary>
         private void ApplyUserValue(int shift) {
-            var value = this.GetUserValue();
+            var target = this.drawRenderer;
+            var value = GetUserValue(target);
             if (this.userValueShift >= 0)
-                value &= ~(0xFFu << this.userValueShift);
-            value &= ~(0xFFu << shift);
+                value &= ~(FakeShadowManager.USER_VALUE_MASK << this.userValueShift);
+            value &= ~(FakeShadowManager.USER_VALUE_MASK << shift);
             value |= (uint)(this.shadowIndex + 1) << shift;
-            this.SetUserValue(value);
+            this.SetUserValue(target, value);
             this.userValueShift = shift;
         }
 
@@ -220,64 +234,119 @@ namespace UTJ {
         /// User Valueから割当インデックスを消去する
         /// </summary>
         private void ClearUserValue() {
-            if (this.userValueShift >= 0 && this.renderer != null)
-                this.SetUserValue(this.GetUserValue() & ~(0xFFu << this.userValueShift));
+            var target = this.drawRenderer;
+            if (this.userValueShift >= 0 && target != null)
+                this.SetUserValue(target, GetUserValue(target) & ~(FakeShadowManager.USER_VALUE_MASK << this.userValueShift));
             this.userValueShift = -1;
             this.shadowIndex = -1;
         }
 
         /// <summary>
-        /// Shadow Meshに割り当てた共通Materialを元に戻す
+        /// Decal Mapに描画するRenderer (Shadow Mesh指定時は内部のRenderer)
         /// </summary>
-        private void RestoreMaterials() {
-            if (this.originalMaterials == null)
+        private Renderer drawRenderer { get => this.shadowRenderer != null ? this.shadowRenderer : this.renderer; }
+
+        /// <summary>
+        /// Shadow Meshの検証 (割当前にFakeShadowManagerから呼ぶ)
+        /// SubMesh数・Material数・頂点数は元のMeshと一致しなくてよいが、スケルトン (ボーン数・順序) は一致させること
+        /// </summary>
+        /// <returns>Shadow Meshで描画できる</returns>
+        internal bool ValidateShadowMesh() {
+            if (this.shadowMesh == null)
+                return true;
+            if (this.renderer == null)
+                this.renderer = this.GetComponent<Renderer>();
+            if (!(this.renderer is SkinnedMeshRenderer source)) {
+                Debug.LogError($"Shadow Mesh supports only SkinnedMeshRenderer : {this.name}", this);
+                return false;
+            }
+            var boneCount = source.bones.Length;
+            if (this.shadowMesh.bindposeCount != boneCount) {
+                Debug.LogError($"Shadow Mesh [{this.shadowMesh.name}] does not match the skeleton of the renderer (bindposes: {this.shadowMesh.bindposeCount}, bones: {boneCount}) : {this.name}", this);
+                return false;
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// Shadow Mesh描画用の内部Rendererの生成・更新
+        /// Setupは割当数の変更やShader変更でStopを経ずに何度も呼ばれるので、生成済みならMaterial・Layerのみ更新する
+        /// </summary>
+        private void SetupShadowRenderer(in FakeShadowManager.MatParam param) {
+            var source = (SkinnedMeshRenderer)this.renderer; // ValidateShadowMeshで検証済み
+            if (this.shadowRenderer == null) {
+                // 元のRendererに書き込み済みのインデックスを消す（Shadow Meshの指定が稼働中に変更された場合）
+                if (this.userValueShift >= 0)
+                    this.SetUserValue(source, GetUserValue(source) & ~(FakeShadowManager.USER_VALUE_MASK << this.userValueShift));
+
+                // ボーンを共有するので親子関係は不要
+                // 親を持たないことで、元のGameObjectのSetActive(false)やInstantiateによる複製の影響を受けない
+                var go = new GameObject($"{this.name} (FakeShadow)");
+                go.hideFlags = HideFlags.HideAndDontSave;
+                // 加算Scene・Prefab ModeのPreview Sceneで描画対象のSceneを揃える
+                // NOTE: HideAndDontSaveのGameObjectはSceneのアンロードでは破棄されないので、必ずStopで破棄する
+                var scene = this.gameObject.scene;
+                if (scene.IsValid() && scene.isLoaded && go.scene != scene)
+                    SceneManager.MoveGameObjectToScene(go, scene);
+
+                var smr = go.AddComponent<SkinnedMeshRenderer>();
+                smr.bones = source.bones;
+                smr.rootBone = source.rootBone;
+                smr.sharedMesh = this.shadowMesh;
+                smr.localBounds = source.localBounds;
+                smr.updateWhenOffscreen = source.updateWhenOffscreen;
+                // Decal Mapへの描画専用
+                // NOTE: ShadowsOnlyはカメラの描画リストから外れるのでDecal Mapにも描画されない
+                smr.shadowCastingMode = ShadowCastingMode.Off;
+                smr.receiveShadows = false;
+                smr.lightProbeUsage = LightProbeUsage.Off;
+                smr.reflectionProbeUsage = ReflectionProbeUsage.Off;
+                smr.skinnedMotionVectors = false;
+                smr.motionVectorGenerationMode = MotionVectorGenerationMode.Camera;
+                this.shadowRenderer = smr;
+            } else if (this.shadowRenderer.sharedMesh != this.shadowMesh) {
+                this.shadowRenderer.sharedMesh = this.shadowMesh;
+            }
+
+            // overrideMaterialで描画するので、対象のPassを持つ共通Materialを割り当てる
+            // NOTE: Materialは何であってもoverrideMaterialに差し替わるのでSRP Batcherのバッチは分かれない
+            var materials = new Material[this.shadowMesh.subMeshCount];
+            for (var i = 0; i < materials.Length; ++i)
+                materials[i] = param.material;
+            this.shadowRenderer.sharedMaterials = materials;
+            this.shadowRenderer.gameObject.layer = param.shadowCasterLayer;
+        }
+
+        /// <summary>
+        /// Shadow Mesh描画用の内部Rendererの破棄
+        /// </summary>
+        private void ReleaseShadowRenderer() {
+            var smr = this.shadowRenderer;
+            this.shadowRenderer = null;
+            if (smr == null)
                 return;
-            if (this.renderer != null)
-                this.renderer.sharedMaterials = this.originalMaterials;
-            this.originalMaterials = null;
-#if UNITY_EDITOR
-            s_AssignedShadowMeshes.Remove(this);
-#endif
+            var go = smr.gameObject;
+            if (Application.isPlaying) {
+                // Destroyはフレーム末まで残るので、それまで描画されないように無効化する
+                go.SetActive(false);
+                Destroy(go);
+            } else {
+                DestroyImmediate(go);
+            }
         }
 
-#if UNITY_EDITOR
-        // 共通MaterialはHideAndDontSaveなので、Edit Modeで割り当てたままSceneに保存させない
-        private static readonly System.Collections.Generic.HashSet<FakeShadow> s_AssignedShadowMeshes = new System.Collections.Generic.HashSet<FakeShadow>(FakeShadowReferenceComparer.instance);
-        private static readonly System.Collections.Generic.Dictionary<FakeShadow, Material[]> s_SavingMaterials = new System.Collections.Generic.Dictionary<FakeShadow, Material[]>(FakeShadowReferenceComparer.instance);
-
-        [UnityEditor.InitializeOnLoadMethod]
-        private static void RegisterSceneSaveCallbacks() {
-            UnityEditor.SceneManagement.EditorSceneManager.sceneSaving += (scene, path) => {
-                s_AssignedShadowMeshes.RemoveWhere(shadow => shadow == null);
-                foreach (var shadow in s_AssignedShadowMeshes) {
-                    if (shadow.gameObject.scene != scene || shadow.renderer == null)
-                        continue;
-                    s_SavingMaterials.Add(shadow, shadow.renderer.sharedMaterials);
-                    shadow.renderer.sharedMaterials = shadow.originalMaterials;
-                }
-            };
-            UnityEditor.SceneManagement.EditorSceneManager.sceneSaved += scene => {
-                foreach (var pair in s_SavingMaterials) {
-                    if (pair.Key != null && pair.Key.renderer != null)
-                        pair.Key.renderer.sharedMaterials = pair.Value;
-                }
-                s_SavingMaterials.Clear();
-            };
-        }
-#endif
-
-        private uint GetUserValue() {
-            if (this.renderer is SkinnedMeshRenderer smr)
+        private static uint GetUserValue(Renderer renderer) {
+            if (renderer is SkinnedMeshRenderer smr)
                 return smr.GetShaderUserValue();
-            if (this.renderer is MeshRenderer mr)
+            if (renderer is MeshRenderer mr)
                 return mr.GetShaderUserValue();
             return 0u;
         }
 
-        private void SetUserValue(uint value) {
-            if (this.renderer is SkinnedMeshRenderer smr)
+        private void SetUserValue(Renderer renderer, uint value) {
+            if (renderer is SkinnedMeshRenderer smr)
                 smr.SetShaderUserValue(value);
-            else if (this.renderer is MeshRenderer mr)
+            else if (renderer is MeshRenderer mr)
                 mr.SetShaderUserValue(value);
             else
                 Debug.LogError($"FakeShadow supports only MeshRenderer and SkinnedMeshRenderer : {this.name}");
