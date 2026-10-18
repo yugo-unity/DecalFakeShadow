@@ -299,11 +299,12 @@ namespace UTJ {
         }
 
         /// <summary>
-        /// 稼働中のShadowをすべてキャンセルする (FakeShadowが無効になる設定を検出した場合)
+        /// 稼働中のShadowをすべて一時停止する (FakeShadowが無効になる設定を検出した場合)
         /// DecalProjectorを無効にしないと、停止した影が描画され続ける
-        /// キャンセルされたShadowは自動では復帰しない (Wakeupの呼び直しが必要)
+        /// 一時停止したShadowはリクエストとして積み直すので、設定が戻ると自動で復帰する
+        /// (設定が無効な間はFakeShadowPassFeatureがResolveRequestsを呼ばないので、リクエストは保留される)
         /// </summary>
-        internal static void CancelAll() {
+        internal static void SuspendAll() {
             if (available.Count == 0)
                 return;
             foreach (var shadow in available.Keys) {
@@ -315,7 +316,7 @@ namespace UTJ {
             availableCount = 0;
             ClearShadowData();
             foreach (var shadow in cancels)
-                shadow.Cancel();
+                shadow.Suspend();
             cancels.Clear();
         }
 
@@ -626,6 +627,35 @@ namespace UTJ {
         private WARNING warned = WARNING.NONE;
 #if UNITY_EDITOR
         private bool maskWarned = false;
+
+        // Edit Modeの再描画要求
+        // 設定の判定はAddRenderPasses、反映は次の描画のOnBeginContextRenderingで行うので、反映には描画が2回要る
+        // Edit ModeはViewの再描画が変更時にしか走らないので、判定が反映済みの状態と違う場合は再描画を1回予約する
+        private enum APPLIED {
+            NONE,       // 未判定（DecalRendererFeatureが無い場合を含む）
+            SUSPENDED,  // 一時停止（非対応のTechnique、Use Rendering Layers無効、Shadow Caster Layer未設定）
+            ACTIVE,     // 稼働
+        }
+        private APPLIED applied = APPLIED.NONE;
+        private bool repaintRequested = false;
+
+        private void RequestRepaintIfChanged(APPLIED current) {
+            if (Application.isPlaying || this.repaintRequested || current == this.applied)
+                return;
+            // 設定を反映するのは先頭のFeatureだけなので、それ以外は要求しない（反映されず再描画が続く）
+            if (!FakeShadowManager.IsOwner(this))
+                return;
+            this.repaintRequested = true;
+            // 描画中に再描画を呼ぶと再入するので、描画の後に行う
+            // NOTE: delayCallはEditorが非フォーカスの間は実行されないことがあるので、updateで1回だけ行う
+            UnityEditor.EditorApplication.update -= RepaintAllViewsOnce;
+            UnityEditor.EditorApplication.update += RepaintAllViewsOnce;
+        }
+
+        private static void RepaintAllViewsOnce() {
+            UnityEditor.EditorApplication.update -= RepaintAllViewsOnce;
+            UnityEditorInternal.InternalEditorUtility.RepaintAllViews();
+        }
 #endif
 
         /// <summary>
@@ -729,6 +759,8 @@ namespace UTJ {
             this.warned = WARNING.NONE;
 #if UNITY_EDITOR
             this.maskWarned = false;
+            this.applied = APPLIED.NONE;
+            this.repaintRequested = false;
 #endif
         }
 
@@ -743,15 +775,19 @@ namespace UTJ {
             FakeShadowManager.SetShader(this.fakeShadowShader);
             FakeShadowManager.SetDefaultColor(this.shadowColor);
 
+#if UNITY_EDITOR
+            this.repaintRequested = false;
+            this.applied = this.JudgeState(this.cachedTechnique);
+#endif
             // DecalRendererFeatureが無い（未判定を含む）場合は何もしない（判定はAddRenderPassesで更新）
             if (this.cachedTechnique == DecalTechnique.Invalid)
                 return;
-            // 非対応のTechnique、またはUse Rendering Layers無効の場合は稼働中の影をキャンセルする
+            // 非対応のTechnique、またはUse Rendering Layers無効の場合は稼働中の影を一時停止する（設定が戻ると自動で復帰する）
             // NOTE: 停止しただけではDecalProjectorと前回のDecal Mapが残り、止まった影が描画され続ける
             //       DBufferではAddRenderPassesでDrawCall Jobが発行されるので、検出したAddRenderPassesではなく次の描画前に行う
             // Shadow Caster Layerが未設定の場合も同様（Shadow Mesh用の内部RendererのLayerを決められない）
-            if (this.cachedTechnique == DecalTechnique.GBuffer || !this.cachedDecalLayers || this.shadowCasterLayer.value == 0) {
-                FakeShadowManager.CancelAll();
+            if (!this.IsSupported(this.cachedTechnique)) {
+                FakeShadowManager.SuspendAll();
                 return;
             }
 
@@ -767,8 +803,26 @@ namespace UTJ {
 #endif
         }
 
+        /// <summary>
+        /// FakeShadowを稼働できる設定か (Technique判定済みの場合)
+        /// </summary>
+        private bool IsSupported(DecalTechnique technique) {
+            return technique != DecalTechnique.GBuffer && this.cachedDecalLayers && this.shadowCasterLayer.value != 0;
+        }
+
+#if UNITY_EDITOR
+        private APPLIED JudgeState(DecalTechnique technique) {
+            if (technique == DecalTechnique.Invalid)
+                return APPLIED.NONE;
+            return this.IsSupported(technique) ? APPLIED.ACTIVE : APPLIED.SUSPENDED;
+        }
+#endif
+
         public override void AddRenderPasses(ScriptableRenderer renderer, ref RenderingData renderingData) {
             var technique = this.GetDecalTechnique(renderer);
+#if UNITY_EDITOR
+            this.RequestRepaintIfChanged(this.JudgeState(technique));
+#endif
             if (technique == DecalTechnique.Invalid)
                 return;
             if (this.UpdateWarning(WARNING.GBUFFER, technique == DecalTechnique.GBuffer, "FakeShadowPassFeature does not support Decal GBuffer technique (Deferred). FakeShadow is disabled."))

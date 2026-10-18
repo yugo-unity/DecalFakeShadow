@@ -103,6 +103,17 @@ namespace UTJ {
             this.Stop(returnShadow: false);
         }
 
+        /// <summary>
+        /// FakeShadowManagerによる一時停止（FakeShadowが無効になる設定を検出した場合）
+        /// 停止したうえでリクエストを積み直し、設定が戻った後のResolveRequestsで再割当する
+        /// インデックスはManager側で回収済みなので返却しない
+        /// </summary>
+        internal void Suspend() {
+            this.Stop(returnShadow: false);
+            FakeShadowManager.Request(this);
+            this.state |= STATE.REQUEST;
+        }
+
         private void Stop(bool returnShadow) {
             if (returnShadow && this.state.HasFlag(STATE.AVAILABLE))
                 FakeShadowManager.Return(this);
